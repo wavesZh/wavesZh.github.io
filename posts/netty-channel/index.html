@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><meta property="og:title" content="Netty Channel" />
+<meta property="og:description" content="channel在编程中是一个很常见的东西，中文解释为：通道。其一般是数据传输的媒介，例如FileChannel，SocketChannel等，可以进行异步的I/O操作。
+在Netty中也不例外，那么来看看其跟Java Nio Channel是如何配合的。
+
+" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://waveszh.github.io/posts/netty-channel/" />
+<meta property="article:published_time" content="2019-03-18T18:22:40+08:00" />
+<meta property="article:modified_time" content="2019-03-18T18:22:40+08:00" />
+<title>Netty Channel | X-Y-Z</title>
+<link rel="icon" href="/favicon.png" type="image/x-icon">
+
+
+<link rel="stylesheet" href="/book.min.a5976c405dae433d8f29b44570050888016c89d73d4734909e982c645bbb4d05.css" integrity="sha256-pZdsQF2uQz2PKbRFcAUIiAFsidc9RzSQnpgsZFu7TQU=">
+
+
+<script defer src="/search.min.4b5374ff6744223ff0adad18171a251385303ccb9ef225664aea3b0e539578fd.js" integrity="sha256-S1N0/2dEIj/wra0YFxolE4UwPMue8iVmSuo7DlOVeP0="></script>
+
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+  
+</head>
+
+<body>
+  <input type="checkbox" class="hidden" id="menu-control" />
+  <main class="flex container">
+
+    <aside class="book-menu fixed">
+      <nav>
+<h2 class="book-brand">
+  <a href="https://waveszh.github.io/"><span>X-Y-Z</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" placeholder="Search" id="book-search-input" maxlength="64" />
+  <div class="book-search-spinner spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+    <ul>
+<li><a href="/posts/"><strong>Blog</strong></a></li>
+</ul>
+
+
+
+
+
+</nav>
+
+
+<script>
+(function() {
+  var menu = document.querySelector("aside.book-menu nav");
+  addEventListener("beforeunload", function(event) {
+    localStorage.setItem("menu.scrollTop", menu.scrollTop);
+  });
+  menu.scrollTop = localStorage.getItem("menu.scrollTop");
+})();
+</script>
+
+    </aside>
+
+    <div class="book-posts">
+      <header class="flex align-center justify-between book-header">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" alt="Menu" />
+  </label>
+  <strong>Netty Channel</strong>
+</header>
+
+      
+
+<header class="markdown">
+  <h1>Netty Channel</h1>
+  <h5>
+    <strong>Mar 18, 2019</strong>
+  </h5>
+</header>
+<article class="markdown"><p>channel在编程中是一个很常见的东西，中文解释为：通道。其一般是数据传输的媒介，例如FileChannel，SocketChannel等，可以进行异步的I/O操作。
+在Netty中也不例外，那么来看看其跟Java Nio Channel是如何配合的。</p>
+
+<!--
+带着问题找答案：
+
+1. netty的channel与nio自带的channel有什么关系，是扩展还是组合，优势，不然为什么要重新实现？
+
+2. channel扩展类的选择以及优化？
+--> 
+
+<h2 id="0-目录">0 目录</h2>
+
+<ul>
+<li><a href="#简介">简介</a></li>
+<li><a href="#Channel">Channel</a></li>
+<li><a href="#Unsafe">Unsafe</a></li>
+</ul>
+
+<blockquote>
+<p>Netty version: 4.1</p>
+</blockquote>
+
+<p><span id="简介"/></p>
+
+<h2 id="1-简介">1 简介</h2>
+
+<p>Netty Channel是网络I/O读写抽象出的接口，其只是Java Nio Channel的一个门面，为众多Nio Channel功能扩展提供了统一的接口。</p>
+
+<p>why they try to reinvent the wheel? 那肯定是轮子不合适啊！《Netty权威指南》有解释，这里简单概括：</p>
+
+<ol>
+<li>使用不方便：原生channel接口不统一，切换不爽。</li>
+<li>扩展不方便：不能很好与Netty的架构融合。</li>
+</ol>
+
+<p>自定义后的Channel除了拥有基础的网络I/O功能，兼容多个I/O模型：NIO/OIO，提供了统一视图。另外，可以更加细致地配置网络I/O。Netty是一个
+事件驱动的框架，则Channel也实现网络I/O事件通知以便用户通过handler灵活处理各个事件，类似AOP的功能。</p>
+
+<!--
+1. 没提供统一的操作视图，使用不方便。
+2. 继承扩展难度大。
+3. 无法功能扩展，如一些netty特有的模型。
+4. 自定义channel，功能更加灵活。
+-->
+
+<!--虽然重新设置了netty专属的channel，但这不代表nio channel丢弃了，其作为一个底层组件为上层提供基本功能。-->
+
+<!--channel中真正实现I/O操作是Unsafe工具。"不安全"是指对于开发者而言慎用，其属于底层api，误用可能会导致不可预知的后果。-->
+
+<p><span id="Channel"/></p>
+
+<h2 id="2-channel">2 Channel</h2>
+
+<h3 id="2-1-主要api">2.1 主要api</h3>
+
+<p>除了网络I/O的必要操作：bind，connect，read，write等相关操作。另外还有Netty的特色方法：</p>
+
+<ol>
+<li>ChannelId id()。获取当前channel的唯一标识。</li>
+<li>EventLoop eventLoop()。获取当前channel所注册的eventLoop。每个channel只能注册一个eventLoop，一个eventLoop可以绑定多个channel，eventLoop通过多路复用器触发channel的I/O操作。</li>
+<li>Channel parent()。对于服务端channel，返回null；对于客户端channel，则返回服务端parent eventLoop中接收连接的channel。注意，
+这里说的服务端channel不是指服务端产生的channel，而是指ServerSocketChannel，客户端Channel也是指SocketChannel。具体后面有介绍。</li>
+<li>ChannelMetadata metadata()。获取channel配置，网络I/O配置等。
+<!--channel可以看作一个connection，肯定是利用了socket套接字，那么可以设置TCP参数。--></li>
+<li>Unsafe unsafe()。I/O操作工具类。</li>
+<li>ChannelPipeline pipeline()。pipeline，一个handler&rdquo;管道&rdquo;，类似拦截器的功能，拦截处理channel的事件。可以利用其进行I/O操作。</li>
+</ol>
+
+<p>channel的子类很多，就看其中两个常见的 <strong><code>NioServerSocketChannel</code></strong> 和 <strong><code>NioSocketChannel</code></strong>以了解channel在netty中是怎么工作的。</p>
+
+<p><img src="/images/netty-channel-class.png" alt="" /></p>
+
+<p>从相同的地方开始说起</p>
+
+<h3 id="2-2-abstractchannel">2.2 AbstractChannel</h3>
+
+<p><code>Channel</code>的基本骨架，实现了其大部分功能。主要看看I/O操作。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">ChannelFuture</span> connect(SocketAddress <span style="color:#a6e22e">remoteAddress</span>) {
+    <span style="color:#66d9ef">return</span> pipeline.<span style="color:#a6e22e">connect</span>(remoteAddress);
+}
+<span style="color:#66d9ef">public</span> <span style="color:#a6e22e">ChannelFuture</span> connect(SocketAddress <span style="color:#a6e22e">remoteAddress</span>) {
+    <span style="color:#66d9ef">return</span> pipeline.<span style="color:#a6e22e">connect</span>(remoteAddress);
+}
+<span style="color:#75715e">// read, write等
+</span><span style="color:#75715e"></span>.... ....</code></pre></div>
+<p>发现I/O操作都有pipeline的身影。pipeline是channel内部更细的一个通道，更加细致的处理I/O事件。
+其使用了责任链模式，事件在pipeline里面传播并由相应handler处理。下篇再详细介绍。</p>
+
+<h3 id="2-3-abstractniochannel">2.3 AbstractNioChannel</h3>
+
+<p>从私有变量看起，这可是这个类独有的东西，或许可以看出一个类的大概功能。</p>
+
+<p>关注下<code>readInterestOp</code>属性，用于设置selector感兴趣的option。取值于NIO.SelectionKey中的OP_READ，OP_WRITE，OP_CONNECT，OP_ACCEPT。
+Nio client channel是OP_READ，偏向字节流消息的处理；Nio server channel是OP_ACCEPT，偏向连接等对象的处理。</p>
+
+<p><code>selectionKey</code>是channel注册到eventLoop后返回的选择键，便于调整interestOps。另外其是volatile，也没有CAS更新操作，仅保证内存可见性，保证写互斥。说明其可能会被多个线程同时使用。</p>
+
+<p><code>readPending</code>，字面意思 &ldquo;读等待中&rdquo;，主要为了判断是否能清除op_read。</p>
+
+<p><code>connectPromise</code>表示连接结果；<code>connectTimeoutFuture</code>表示定时检测连接是否超时的结果。</p>
+
+<p>通过这些，感觉该类偏向维护网络通道状态以及设置网络操作位。</p>
+
+<!--这样大概可以得知， `AbstractNioChannel`主要负责连接的建立及维护。-->
+
+<h4 id="2-3-1-doregister">2.3.1 doRegister()</h4>
+
+<p>注册nio.channel</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">void</span> doRegister() <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    ... ...
+    <span style="color:#75715e">// 使用了nio.channel的原生方法，将channel注册到selector并初始化interest ops为0，表示不处理任何事件
+</span><span style="color:#75715e"></span>    selectionKey <span style="color:#f92672">=</span> javaChannel().<span style="color:#a6e22e">register</span>(eventLoop().<span style="color:#a6e22e">unwrappedSelector</span>(), 0, <span style="color:#66d9ef">this</span>);
+    ... ...
+}</code></pre></div>
+<h4 id="2-3-2-dobeginread">2.3.2 doBeginRead()</h4>
+
+<p>读操作之前的准备，该方法一般是在连接建立（channelActive）后执行</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">void</span> doBeginRead() <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    <span style="color:#75715e">// Channel.read() or ChannelHandlerContext.read() was called
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">SelectionKey</span> selectionKey <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">selectionKey</span>;
+    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>selectionKey.<span style="color:#a6e22e">isValid</span>()) {
+        <span style="color:#66d9ef">return</span>;
+    }
+    <span style="color:#75715e">// 标志此时有读操作正在处理
+</span><span style="color:#75715e"></span>    readPending <span style="color:#f92672">=</span> <span style="color:#66d9ef">true</span>;
+    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">int</span> interestOps <span style="color:#f92672">=</span> selectionKey.<span style="color:#a6e22e">interestOps</span>();
+    <span style="color:#75715e">// 设置通道的网络操作位以监听网络的读事件
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> ((interestOps <span style="color:#f92672">&amp;</span> readInterestOp) <span style="color:#f92672">==</span> 0) {
+        selectionKey.<span style="color:#a6e22e">interestOps</span>(interestOps <span style="color:#f92672">|</span> readInterestOp);
+    }
+}</code></pre></div>
+<!--`ch.configureBlocking(false);` 既然是nio，肯定要非阻塞啦。-->
+
+<h3 id="2-4-abstractniomessagechannel">2.4 AbstractNioMessageChannel</h3>
+
+<p><code>inputShutdown</code>标识input数据流是否关闭</p>
+
+<h4 id="2-4-1-dowrite-channeloutboundbuffer">2.4.1 doWrite(ChannelOutboundBuffer)</h4>
+
+<p>在一个for循环中进行操作（<code>doWriteMessage</code>），直至message处理完成。注意，完全发送完后需要将OP_WRITE从通道的网络操作位中删除，防止重复触发。OP_WRITE可以看作是一次性事件，只有在socket发送缓冲区不足时才会设置。</p>
+
+<h3 id="2-5-nioserversocketchannel">2.5 NioServerSocketChannel</h3>
+
+<p>服务端channel，故 <code>doDisconnect()</code>和<code>doWriteMessage(Object, ChannelOutboundBuffer)</code>等属于客户端channel的方法都不支持。</p>
+
+<p><code>METADATA</code>定义了channel的属性；<code>DEFAULT_SELECTOR_PROVIDER</code>为系统级别的selector provider。</p>
+
+<p><code>newSocket(SelectorProvider)</code>方法则创建nio中ServerSocketChannel。</p>
+
+<h4 id="2-5-1-nioserversocketchannel-serversocketchannel">2.5.1 NioServerSocketChannel(ServerSocketChannel)</h4>
+
+<p>NioServerSocketChannel的初始化方法</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">NioServerSocketChannel</span>(ServerSocketChannel <span style="color:#a6e22e">channel</span>) {
+    <span style="color:#75715e">// 将 `readInterestOp`设置为OP_ACCEPT， parent为null，表明其偏向接收客户端连接
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">super</span>(<span style="color:#66d9ef">null</span>, channel, SelectionKey.<span style="color:#a6e22e">OP_ACCEPT</span>);
+    config <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> NioServerSocketChannelConfig(<span style="color:#66d9ef">this</span>, javaChannel().<span style="color:#a6e22e">socket</span>());
+}</code></pre></div>
+<h4 id="2-5-2-dobind-socketaddress">2.5.2 doBind(SocketAddress)</h4>
+
+<p>将channel的socket与本地地址绑定并监听</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">void</span> doBind(SocketAddress <span style="color:#a6e22e">localAddress</span>) <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    <span style="color:#66d9ef">if</span> (PlatformDependent.<span style="color:#a6e22e">javaVersion</span>() <span style="color:#f92672">&gt;=</span> 7) {
+        javaChannel().<span style="color:#a6e22e">bind</span>(localAddress, config.<span style="color:#a6e22e">getBacklog</span>());
+    } <span style="color:#66d9ef">else</span> {
+        javaChannel().<span style="color:#a6e22e">socket</span>().<span style="color:#a6e22e">bind</span>(localAddress, config.<span style="color:#a6e22e">getBacklog</span>());
+    }
+}</code></pre></div>
+<p>back_log是tcp的配置，指定连接队列的大小。类似一个消息队列，请求顺序被执行。</p>
+
+<h4 id="2-5-3-doreadmessages-list-object">2.5.3 doReadMessages(List&lt; Object &gt;)</h4>
+
+<p>对于服务端channel，其读操作就是接收客户端连接</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">int</span> doReadMessages(List<span style="color:#f92672">&lt;</span>Object<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">buf</span>) <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    <span style="color:#75715e">// 接收连接
+</span><span style="color:#75715e"></span>    SocketChannel <span style="color:#a6e22e">ch</span> <span style="color:#f92672">=</span> SocketUtils.<span style="color:#a6e22e">accept</span>(javaChannel());
+
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#66d9ef">if</span> (ch <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>) {
+             <span style="color:#75715e">//  封装为客户端channel并保存
+</span><span style="color:#75715e"></span>            buf.<span style="color:#a6e22e">add</span>(<span style="color:#66d9ef">new</span> NioSocketChannel(<span style="color:#66d9ef">this</span>, ch));
+            <span style="color:#66d9ef">return</span> 1;
+        }
+    } <span style="color:#66d9ef">catch</span> (Throwable <span style="color:#a6e22e">t</span>) {
+        ... ... 
+    }
+    <span style="color:#66d9ef">return</span> 0;
+}</code></pre></div>
+<h3 id="2-6-abstractniobytechannel">2.6 AbstractNioByteChannel</h3>
+
+<p>类名跟<code>AbstractNioMessageChannel</code>很相似，只是一个是Message，一个是Byte。通过其各自的doReadXX方法和doWriteXX方法的参数可以得知，这是指其消息类型的区别，<code>AbstractNioMessageChannel</code>处理的消息为对象，
+<code>AbstractNioByteChannel</code>处理的消息为字节流。</p>
+
+<h4 id="2-6-1-abstractniobytechannel-channel-selectablechannel">2.6.1 AbstractNioByteChannel(Channel, SelectableChannel)</h4>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">AbstractNioByteChannel</span>(Channel <span style="color:#a6e22e">parent</span>, SelectableChannel <span style="color:#a6e22e">ch</span>) {
+    <span style="color:#75715e">// 将 `readInterestOp`设置为OP_READ，表明其偏向接收客户端消息
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">super</span>(parent, ch, SelectionKey.<span style="color:#a6e22e">OP_READ</span>);
+}</code></pre></div>
+<h4 id="2-6-2-dowriteinternal-channeloutboundbuffer-object">2.6.2 doWriteInternal(ChannelOutboundBuffer, Object)</h4>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#75715e">// 返回值代表读取的消息数
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">int</span> doWriteInternal(ChannelOutboundBuffer <span style="color:#a6e22e">in</span>, Object <span style="color:#a6e22e">msg</span>) <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    <span style="color:#66d9ef">if</span> (msg <span style="color:#a6e22e">instanceof</span> ByteBuf) {
+        ByteBuf <span style="color:#a6e22e">buf</span> <span style="color:#f92672">=</span> (ByteBuf) msg;
+        <span style="color:#75715e">// 是否已经读完，是则删除消息
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>buf.<span style="color:#a6e22e">isReadable</span>()) {
+            in.<span style="color:#a6e22e">remove</span>();
+            <span style="color:#66d9ef">return</span> 0;
+        }
+        <span style="color:#75715e">// localFlushedAmount是write至缓冲区的字节数，用于记数
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">int</span> localFlushedAmount <span style="color:#f92672">=</span> doWriteBytes(buf);
+        <span style="color:#75715e">// 如果localFlushedAmount&lt;=0，则当前缓冲区空间不足
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (localFlushedAmount <span style="color:#f92672">&gt;</span> 0) {
+            in.<span style="color:#a6e22e">progress</span>(localFlushedAmount);
+            <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>buf.<span style="color:#a6e22e">isReadable</span>()) {
+                in.<span style="color:#a6e22e">remove</span>();
+            }
+            <span style="color:#66d9ef">return</span> 1;
+        }
+    } 
+    ... ...
+    <span style="color:#75715e">// FileRegion的处理，大同小异
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">return</span> WRITE_STATUS_SNDBUF_FULL;
+}</code></pre></div>
+<h4 id="2-6-3-dowrite-channeloutboundbuffer">2.6.3 doWrite(ChannelOutboundBuffer)</h4>
+
+<p>super.flush0-&gt;doWrite，直至消息完全写完或者TCP socket发送缓冲区不足</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">void</span> doWrite(ChannelOutboundBuffer <span style="color:#a6e22e">in</span>) <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    <span style="color:#75715e">// 获取write次数
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">writeSpinCount</span> <span style="color:#f92672">=</span> config().<span style="color:#a6e22e">getWriteSpinCount</span>();
+    <span style="color:#75715e">// 循环发送消息（FileRegion or ByteBuf），可能一次发送不完。这种不完全发送的消息简称半包
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">do</span> {
+        Object <span style="color:#a6e22e">msg</span> <span style="color:#f92672">=</span> in.<span style="color:#a6e22e">current</span>();
+        <span style="color:#66d9ef">if</span> (msg <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
+            <span style="color:#75715e">// 消息已经完全写完，清除OP_WRITE
+</span><span style="color:#75715e"></span>            clearOpWrite();
+            <span style="color:#66d9ef">return</span>;
+        }
+        writeSpinCount <span style="color:#f92672">-=</span> doWriteInternal(in, msg);
+    } <span style="color:#66d9ef">while</span> (writeSpinCount <span style="color:#f92672">&gt;</span> 0);
+    <span style="color:#75715e">// writeSpinCount&gt;0: 消息已经完全写完
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// writeSpinCount==0: 异步继续write-flush剩余半包
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// writeSpinCount&lt;0: 发送缓冲区不足，设置OP_WRITE
+</span><span style="color:#75715e"></span>    incompleteWrite(writeSpinCount <span style="color:#f92672">&lt;</span> 0);
+}</code></pre></div>
+<h3 id="2-7-niosocketchannel">2.7 NioSocketChannel</h3>
+
+<p>客户端channel</p>
+
+<h4 id="2-7-1-doconnect-socketaddress-socketaddress">2.7.1 doConnect(SocketAddress, SocketAddress)</h4>
+
+<p>建立连接</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">boolean</span> doConnect(SocketAddress <span style="color:#a6e22e">remoteAddress</span>, SocketAddress <span style="color:#a6e22e">localAddress</span>) <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    <span style="color:#66d9ef">if</span> (localAddress <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>) {
+        <span style="color:#75715e">// 绑定本地地址
+</span><span style="color:#75715e"></span>        doBind0(localAddress);
+    }
+
+    <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">success</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">false</span>;
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#75715e">// false: 没抛异常，只是暂时连接不上，注册OP_CONNECT，等待connect ready
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// true: 连接成功
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">connected</span> <span style="color:#f92672">=</span> SocketUtils.<span style="color:#a6e22e">connect</span>(javaChannel(), remoteAddress);
+        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>connected) {
+            selectionKey().<span style="color:#a6e22e">interestOps</span>(SelectionKey.<span style="color:#a6e22e">OP_CONNECT</span>);
+        }
+        success <span style="color:#f92672">=</span> <span style="color:#66d9ef">true</span>;
+        <span style="color:#66d9ef">return</span> connected;
+    } <span style="color:#66d9ef">finally</span> {
+         <span style="color:#75715e">// I/O异常，说明客户端的TCP握手请求直接被reset或者被拒绝，关闭channel。
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>success) {
+            doClose();
+        }
+    }
+}</code></pre></div>
+<h4 id="2-7-2-dowrite-channeloutboundbuffer">2.7.2 doWrite(ChannelOutboundBuffer)</h4>
+
+<p>覆写 <code>AbstractNioByteChannel</code>的<code>doWrite</code>方法</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">void</span> doWrite(ChannelOutboundBuffer <span style="color:#a6e22e">in</span>) <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    SocketChannel <span style="color:#a6e22e">ch</span> <span style="color:#f92672">=</span> javaChannel();
+    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">writeSpinCount</span> <span style="color:#f92672">=</span> config().<span style="color:#a6e22e">getWriteSpinCount</span>();
+    <span style="color:#66d9ef">do</span> {
+        <span style="color:#75715e">// 没有消息可写了，清除标识
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (in.<span style="color:#a6e22e">isEmpty</span>()) {
+            clearOpWrite();
+            <span style="color:#66d9ef">return</span>;
+        }
+
+        <span style="color:#75715e">// Ensure the pending writes are made of ByteBufs only.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// maxBytesPerGatheringWrite为user发送缓冲区的大小
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">maxBytesPerGatheringWrite</span> <span style="color:#f92672">=</span> ((NioSocketChannelConfig) config).<span style="color:#a6e22e">getMaxBytesPerGatheringWrite</span>();
+        <span style="color:#75715e">// 获取消息由ByteBuf组成的ByteBuffers.
+</span><span style="color:#75715e"></span>        ByteBuffer[] <span style="color:#a6e22e">nioBuffers</span> <span style="color:#f92672">=</span> in.<span style="color:#a6e22e">nioBuffers</span>(1024, maxBytesPerGatheringWrite);
+        <span style="color:#75715e">// 获取数组数量，但还不清楚为什么直接nioBuffers.length。其值大于等于0
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">nioBufferCnt</span> <span style="color:#f92672">=</span> in.<span style="color:#a6e22e">nioBufferCount</span>();
+
+        <span style="color:#75715e">// Always us nioBuffers() to workaround data-corruption.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// See https://github.com/netty/netty/issues/2761
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">switch</span> (nioBufferCnt) {
+            <span style="color:#66d9ef">case</span> 0<span style="color:#f92672">:</span>
+                <span style="color:#75715e">// 0的可能性：可能消息类型为FileRegion or 消息尚未flush。doWrite0可以处理FileRegion
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">// We have something else beside ByteBuffers to write so fallback to normal writes.
+</span><span style="color:#75715e"></span>                writeSpinCount <span style="color:#f92672">-=</span> doWrite0(in);
+                <span style="color:#66d9ef">break</span>;
+            <span style="color:#66d9ef">case</span> 1<span style="color:#f92672">:</span> {
+                ByteBuffer <span style="color:#a6e22e">buffer</span> <span style="color:#f92672">=</span> nioBuffers[0];
+                <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">attemptedBytes</span> <span style="color:#f92672">=</span> buffer.<span style="color:#a6e22e">remaining</span>();
+                <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">int</span> localWrittenBytes <span style="color:#f92672">=</span> ch.<span style="color:#a6e22e">write</span>(buffer);
+                <span style="color:#75715e">// 当可用缓冲区不足时注册OP_WRITE
+</span><span style="color:#75715e"></span>                <span style="color:#66d9ef">if</span> (localWrittenBytes <span style="color:#f92672">&lt;=</span> 0) {
+                    incompleteWrite(<span style="color:#66d9ef">true</span>);
+                    <span style="color:#66d9ef">return</span>;
+                }
+                <span style="color:#75715e">// 调整user发送缓冲区的大小。因为有些系统可能会动态调整SO_SNDBUF（os发送缓冲区）
+</span><span style="color:#75715e"></span>                adjustMaxBytesPerGatheringWrite(attemptedBytes, localWrittenBytes, maxBytesPerGatheringWrite);
+                <span style="color:#75715e">// 删除已完全发送的消息，释放资源
+</span><span style="color:#75715e"></span>                in.<span style="color:#a6e22e">removeBytes</span>(localWrittenBytes);
+                <span style="color:#f92672">--</span>writeSpinCount;
+                <span style="color:#66d9ef">break</span>;
+            }
+            <span style="color:#66d9ef">default</span><span style="color:#f92672">:</span> {
+                <span style="color:#75715e">// 大于1: 看起来来和等于1的情况很相似，主要不同的地方就是获取attemptedBytes，不太懂
+</span><span style="color:#75715e"></span>                <span style="color:#66d9ef">long</span> <span style="color:#a6e22e">attemptedBytes</span> <span style="color:#f92672">=</span> in.<span style="color:#a6e22e">nioBufferSize</span>();
+                <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">long</span> localWrittenBytes <span style="color:#f92672">=</span> ch.<span style="color:#a6e22e">write</span>(nioBuffers, 0, nioBufferCnt);
+                <span style="color:#66d9ef">if</span> (localWrittenBytes <span style="color:#f92672">&lt;=</span> 0) {
+                    incompleteWrite(<span style="color:#66d9ef">true</span>);
+                    <span style="color:#66d9ef">return</span>;
+                }
+                <span style="color:#75715e">// Casting to int is safe because we limit the total amount of data in the nioBuffers to int above.
+</span><span style="color:#75715e"></span>                adjustMaxBytesPerGatheringWrite((<span style="color:#66d9ef">int</span>) attemptedBytes, (<span style="color:#66d9ef">int</span>) localWrittenBytes,
+                        maxBytesPerGatheringWrite);
+                in.<span style="color:#a6e22e">removeBytes</span>(localWrittenBytes);
+                <span style="color:#f92672">--</span>writeSpinCount;
+                <span style="color:#66d9ef">break</span>;
+            }
+        }
+    } <span style="color:#66d9ef">while</span> (writeSpinCount <span style="color:#f92672">&gt;</span> 0);
+    <span style="color:#75715e">// 到这边的都是没写完的：1. 缓冲区满了 2.writeSpinCount用尽
+</span><span style="color:#75715e"></span>    incompleteWrite(writeSpinCount <span style="color:#f92672">&lt;</span> 0);
+}</code></pre></div>
+<p><code>writeSpinCount</code>存在的意义：控制发送上限。以免数据过大，发送缓冲区满时导致reactor线程（I/O线程）长时间白白等待。</p>
+
+<!--SO_SNDBUF 发送缓冲区-->
+
+<h4 id="2-7-3-channeloutboundbuffer-removebytes-long">2.7.3 ChannelOutboundBuffer.removeBytes(long)</h4>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#75715e">// writtenBytes：已发送的字节数
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> removeBytes(<span style="color:#66d9ef">long</span> <span style="color:#a6e22e">writtenBytes</span>) {
+    <span style="color:#66d9ef">for</span> (;;) {
+        <span style="color:#75715e">// 当前发送的消息
+</span><span style="color:#75715e"></span>        Object <span style="color:#a6e22e">msg</span> <span style="color:#f92672">=</span> current();
+        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>(msg <span style="color:#a6e22e">instanceof</span> ByteBuf)) {
+            <span style="color:#66d9ef">assert</span> writtenBytes <span style="color:#f92672">==</span> 0;
+            <span style="color:#66d9ef">break</span>;
+        }
+
+        <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">ByteBuf</span> buf <span style="color:#f92672">=</span> (ByteBuf) msg;
+        <span style="color:#75715e">// 当前read的位置
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">int</span> readerIndex <span style="color:#f92672">=</span> buf.<span style="color:#a6e22e">readerIndex</span>();
+        <span style="color:#75715e">// 待发送的字节数
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">int</span> readableBytes <span style="color:#f92672">=</span> buf.<span style="color:#a6e22e">writerIndex</span>() <span style="color:#f92672">-</span> readerIndex;
+        
+        <span style="color:#75715e">// 完全发送消息A
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (readableBytes <span style="color:#f92672">&lt;=</span> writtenBytes) {
+             <span style="color:#75715e">// 半包消息B
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (writtenBytes <span style="color:#f92672">!=</span> 0) {
+                <span style="color:#75715e">// 更新发送进度
+</span><span style="color:#75715e"></span>                progress(readableBytes);
+                <span style="color:#75715e">// 获取半包消息B已发送的字节数
+</span><span style="color:#75715e"></span>                writtenBytes <span style="color:#f92672">-=</span> readableBytes;
+            }
+            <span style="color:#75715e">// 删除已经发送的ByteBuf,释放资源
+</span><span style="color:#75715e"></span>            remove();
+        } <span style="color:#66d9ef">else</span> { <span style="color:#75715e">// readableBytes &gt; writtenBytes 即半包发送
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (writtenBytes <span style="color:#f92672">!=</span> 0) {
+                <span style="color:#75715e">// 更新readerIndex，以防重复读写
+</span><span style="color:#75715e"></span>                buf.<span style="color:#a6e22e">readerIndex</span>(readerIndex <span style="color:#f92672">+</span> (<span style="color:#66d9ef">int</span>) writtenBytes);
+                progress(writtenBytes);
+            }
+            <span style="color:#66d9ef">break</span>;
+        }
+    }
+    clearNioBuffers();
+}</code></pre></div>
+<p><span id="Unsafe"/></p>
+
+<h2 id="3-unsafe">3 Unsafe</h2>
+
+<p>Unsafe接口是Channel专属的辅助接口。&rdquo;Unsafe&rdquo;表明其最好不要由用户调用，除非很熟netty。</p>
+
+<p>I/O读写操作实际都是由Unsafe接口完成的。</p>
+
+<h3 id="3-1-api">3.1 api</h3>
+
+<ol>
+<li>void register(EventLoop, ChannelPromise)。将channel注册到selector多路复用器上，完成后通知ChannelFuture。</li>
+<li>void bind(SocketAddress, ChannelPromise)。绑定指定的本地地址到channel上，完成后通知ChannelFuture。</li>
+<li>void connect(SocketAddress, SocketAddress, ChannelPromise)。bind完成后，连接服务端，完成后通知ChannelFuture。</li>
+<li>void beginRead()。设置网络操作用于读取消息。</li>
+<li>void write(Object, ChannelPromise)。通过channel写消息，完成后通知ChannelFuture。</li>
+<li>void flush()。将发送缓冲数组中的消息写入channel。</li>
+</ol>
+
+<p><img src="/images/netty-unsafe-class.png" alt="" /></p>
+
+<h3 id="3-2-abstractunsafe">3.2 AbstractUnsafe</h3>
+
+<p><code>outboundBuffer</code>存储待write的消息。<code>recvHandle</code>记录read情况。<code>inFlush0</code>标识当前是否正在flush。</p>
+
+<h4 id="3-2-1-register-eventloop-final-channelpromise">3.2.1 register(EventLoop, final ChannelPromise)</h4>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">final</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">register</span>(EventLoop <span style="color:#a6e22e">eventLoop</span>, <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">ChannelPromise</span> promise) {
+    ... ...
+    <span style="color:#66d9ef">if</span> (eventLoop.<span style="color:#a6e22e">inEventLoop</span>()) {
+        register0(promise);
+    } <span style="color:#66d9ef">else</span> {
+         eventLoop.<span style="color:#a6e22e">execute</span>(<span style="color:#66d9ef">new</span> Runnable() {
+            <span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> run() {
+                register0(promise);
+            }
+        });
+    }
+    ... ...
+}</code></pre></div>
+<p><code>if (eventLoop.inEventLoop()) doA else eventLoop.execute(doA)</code> 这种模式很常见。
+如果当前线程不是当前channel所绑定eventLoop的reactor线程，则加入任务队列等待reactor线程执行，这样避免了多线程并发操作导致线程安全问题。</p>
+
+<p>主要操作为<code>register0</code>：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">void</span> register0(ChannelPromise <span style="color:#a6e22e">promise</span>) {
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#75715e">// check if the channel is still open as it could be closed in the mean time when the register
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// call was outside of the eventLoop
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>promise.<span style="color:#a6e22e">setUncancellable</span>() <span style="color:#f92672">||</span> <span style="color:#f92672">!</span>ensureOpen(promise)) {
+            <span style="color:#66d9ef">return</span>;
+        }
+        <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">firstRegistration</span> <span style="color:#f92672">=</span> neverRegistered;
+        <span style="color:#75715e">// 抽象方法。channel扩展实现，在channel与eventLoop绑定后调用，将channel注册到selector多路复用器上
+</span><span style="color:#75715e"></span>        doRegister();
+        neverRegistered <span style="color:#f92672">=</span> <span style="color:#66d9ef">false</span>;
+        registered <span style="color:#f92672">=</span> <span style="color:#66d9ef">true</span>;
+
+        <span style="color:#75715e">// 在bind或者connect返回promise之前add handlers to channel pipeline.
+</span><span style="color:#75715e"></span>        pipeline.<span style="color:#a6e22e">invokeHandlerAddedIfNeeded</span>();
+
+        safeSetSuccess(promise);
+        <span style="color:#75715e">// ChannelRegistered：channel注册到selector后触发，感觉跟方法注解描述不一致
+</span><span style="color:#75715e"></span>        pipeline.<span style="color:#a6e22e">fireChannelRegistered</span>();
+        <span style="color:#75715e">// Only fire a channelActive if the channel has never been registered. This prevents firing
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// multiple channel actives if the channel is deregistered and re-registered.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// 判断是否connect成功。一般来说调用connect()方法后，先register后connect，此时是不可能连接成功的。
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// 只有在channel调用deregistered后有重新registere，导致重新绑定了一个新的evenLoop，以免再次触发ChannelActive。
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (isActive()) {
+            <span style="color:#66d9ef">if</span> (firstRegistration) {
+                pipeline.<span style="color:#a6e22e">fireChannelActive</span>();
+            } <span style="color:#66d9ef">else</span> <span style="color:#66d9ef">if</span> (config().<span style="color:#a6e22e">isAutoRead</span>()) {
+                <span style="color:#75715e">// This channel was registered before and autoRead() is set. This means we need to begin read
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">// again so that we process inbound data.
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">// See https://github.com/netty/netty/issues/4805
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">// 重新register后设置网络操作用于读取消息
+</span><span style="color:#75715e"></span>                beginRead();
+            }
+        }
+    } <span style="color:#66d9ef">catch</span> (Throwable <span style="color:#a6e22e">t</span>) {
+        <span style="color:#75715e">// Close the channel directly to avoid FD leak.
+</span><span style="color:#75715e"></span>        closeForcibly();
+        closeFuture.<span style="color:#a6e22e">setClosed</span>();
+        safeSetFailure(promise, t);
+    }
+}</code></pre></div>
+<h4 id="3-2-2-write-object-channelpromise">3.2.2 write(Object, ChannelPromise)</h4>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">final</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">write</span>(Object <span style="color:#a6e22e">msg</span>, ChannelPromise <span style="color:#a6e22e">promise</span>) {
+    assertEventLoop();
+
+    ChannelOutboundBuffer <span style="color:#a6e22e">outboundBuffer</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">outboundBuffer</span>;
+    <span style="color:#66d9ef">if</span> (outboundBuffer <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
+        <span style="color:#75715e">// If the outboundBuffer is null we know the channel was closed and so
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// need to fail the future right away. If it is not null the handling of the rest
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// will be done in flush0()
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// See https://github.com/netty/netty/issues/2362
+</span><span style="color:#75715e"></span>        safeSetFailure(promise, WRITE_CLOSED_CHANNEL_EXCEPTION);
+        <span style="color:#75715e">// release message now to prevent resource-leak
+</span><span style="color:#75715e"></span>        ReferenceCountUtil.<span style="color:#a6e22e">release</span>(msg);
+        <span style="color:#66d9ef">return</span>;
+    }
+
+    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">size</span>;
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#75715e">// 转换msg。 nio模式：将ByteBuffer转成directBuffer
+</span><span style="color:#75715e"></span>        msg <span style="color:#f92672">=</span> filterOutboundMessage(msg);
+        <span style="color:#75715e">// 获取消息字节数
+</span><span style="color:#75715e"></span>        size <span style="color:#f92672">=</span> pipeline.<span style="color:#a6e22e">estimatorHandle</span>().<span style="color:#a6e22e">size</span>(msg);
+        <span style="color:#66d9ef">if</span> (size <span style="color:#f92672">&lt;</span> 0) {
+            size <span style="color:#f92672">=</span> 0;
+        }
+    } <span style="color:#66d9ef">catch</span> (Throwable <span style="color:#a6e22e">t</span>) {
+        safeSetFailure(promise, t);
+        ReferenceCountUtil.<span style="color:#a6e22e">release</span>(msg);
+        <span style="color:#66d9ef">return</span>;
+    }
+    <span style="color:#75715e">// 将消息缓存起来，此时还未发送，需等flush操作
+</span><span style="color:#75715e"></span>    outboundBuffer.<span style="color:#a6e22e">addMessage</span>(msg, size, promise);
+}</code></pre></div>
+<h4 id="3-2-3-flush">3.2.3 flush()</h4>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">final</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">flush</span>() {
+    ... ... 
+    <span style="color:#75715e">// 当前缓存的消息状态设置为flushed以便后面flush0()发送    
+</span><span style="color:#75715e"></span>    outboundBuffer.<span style="color:#a6e22e">addFlush</span>();
+    flush0();
+}</code></pre></div>
+<p>flush0():</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">void</span> flush0() {
+    <span style="color:#66d9ef">if</span> (inFlush0) {
+        <span style="color:#75715e">// 防重入
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">return</span>;
+    }
+    ... ...
+    inFlush0 <span style="color:#f92672">=</span> <span style="color:#66d9ef">true</span>;
+    ... ...
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#75715e">// 将数据写入channel，进行网络传输，由具体的channel实现。
+</span><span style="color:#75715e"></span>        doWrite(outboundBuffer);
+    } <span style="color:#66d9ef">catch</span> (Throwable <span style="color:#a6e22e">t</span>) {
+        ... ...
+    } <span style="color:#66d9ef">finally</span> {
+        inFlush0 <span style="color:#f92672">=</span> <span style="color:#66d9ef">false</span>;
+    }
+}</code></pre></div>
+<blockquote>
+<p>ps： nio read/write都会使用将数据转换direct buffer。<a href="https://www.cnkirito.moe/nio-buffer-recycle/">详情</a></p>
+</blockquote>
+
+<h3 id="3-3-abstractniounsafe">3.3 AbstractNioUnsafe</h3>
+
+<h4 id="3-3-1-connect-final-socketaddress-final-socketaddress-final-channelpromise">3.3.1 connect(final SocketAddress, final SocketAddress, final ChannelPromise)</h4>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">final</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">connect</span>(
+                <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">SocketAddress</span> remoteAddress, <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">SocketAddress</span> localAddress, <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">ChannelPromise</span> promise) {
+    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>promise.<span style="color:#a6e22e">setUncancellable</span>() <span style="color:#f92672">||</span> <span style="color:#f92672">!</span>ensureOpen(promise)) {
+        <span style="color:#66d9ef">return</span>;
+    }
+
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#66d9ef">if</span> (connectPromise <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>) {
+            <span style="color:#75715e">// Already a connect in process.
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> ConnectionPendingException();
+        }
+
+        <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">wasActive</span> <span style="color:#f92672">=</span> isActive();
+        <span style="color:#75715e">// channel扩展实现，nio.connect
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (doConnect(remoteAddress, localAddress)) {
+             <span style="color:#75715e">// 立即返回成功，触发第一次的ChannelActive
+</span><span style="color:#75715e"></span>            fulfillConnectPromise(promise, wasActive);
+        } <span style="color:#66d9ef">else</span> {
+            <span style="color:#75715e">// false 不代表失败，可能需要等待，直接抛异常才算失败。
+</span><span style="color:#75715e"></span>            connectPromise <span style="color:#f92672">=</span> promise;
+            requestedRemoteAddress <span style="color:#f92672">=</span> remoteAddress;
+
+            <span style="color:#75715e">// 注册connecttimeout定时任务。connect time out 关闭channel以及释放其他相关资源
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">connectTimeoutMillis</span> <span style="color:#f92672">=</span> config().<span style="color:#a6e22e">getConnectTimeoutMillis</span>();
+            <span style="color:#66d9ef">if</span> (connectTimeoutMillis <span style="color:#f92672">&gt;</span> 0) {
+                connectTimeoutFuture <span style="color:#f92672">=</span> eventLoop().<span style="color:#a6e22e">schedule</span>(<span style="color:#66d9ef">new</span> Runnable() {
+                    <span style="color:#a6e22e">@Override</span>
+                    <span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> run() {
+                        ChannelPromise <span style="color:#a6e22e">connectPromise</span> <span style="color:#f92672">=</span> AbstractNioChannel.<span style="color:#a6e22e">this</span>.<span style="color:#a6e22e">connectPromise</span>;
+                        ConnectTimeoutException <span style="color:#a6e22e">cause</span> <span style="color:#f92672">=</span>
+                                <span style="color:#66d9ef">new</span> ConnectTimeoutException(<span style="color:#e6db74">&#34;connection timed out: &#34;</span> <span style="color:#f92672">+</span> remoteAddress);
+                        <span style="color:#66d9ef">if</span> (connectPromise <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">&amp;&amp;</span> connectPromise.<span style="color:#a6e22e">tryFailure</span>(cause)) {
+                            close(voidPromise());
+                        }
+                    }
+                }, connectTimeoutMillis, TimeUnit.<span style="color:#a6e22e">MILLISECONDS</span>);
+            }
+            <span style="color:#75715e">// 为connect设置回调，处理connect cancel的情况
+</span><span style="color:#75715e"></span>            promise.<span style="color:#a6e22e">addListener</span>(<span style="color:#66d9ef">new</span> ChannelFutureListener() {
+                <span style="color:#a6e22e">@Override</span>
+                <span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> operationComplete(ChannelFuture <span style="color:#a6e22e">future</span>) <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+                    <span style="color:#66d9ef">if</span> (future.<span style="color:#a6e22e">isCancelled</span>()) {
+                        <span style="color:#66d9ef">if</span> (connectTimeoutFuture <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>) {
+                            connectTimeoutFuture.<span style="color:#a6e22e">cancel</span>(<span style="color:#66d9ef">false</span>);
+                        }
+                        connectPromise <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+                        close(voidPromise());
+                    }
+                }
+            });
+        }
+    } <span style="color:#66d9ef">catch</span> (Throwable <span style="color:#a6e22e">t</span>) {
+        promise.<span style="color:#a6e22e">tryFailure</span>(annotateConnectException(t, remoteAddress));
+        closeIfClosed();
+    }
+}</code></pre></div>
+<h3 id="3-4-niobyteunsafe">3.4 NioByteUnsafe</h3>
+
+<h4 id="3-4-1-read">3.4.1 read()</h4>
+
+<p>读取字节流</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">final</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">read</span>() {
+    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">ChannelConfig</span> config <span style="color:#f92672">=</span> config();
+    <span style="color:#66d9ef">if</span> (shouldBreakReadReady(config)) {
+        clearReadPending();
+        <span style="color:#66d9ef">return</span>;
+    }
+    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">ChannelPipeline</span> pipeline <span style="color:#f92672">=</span> pipeline();
+    <span style="color:#75715e">// 获取byteBuf分配器
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">ByteBufAllocator</span> allocator <span style="color:#f92672">=</span> config.<span style="color:#a6e22e">getAllocator</span>();
+    <span style="color:#75715e">// RecvByteBufAllocator的用途是分配一个容量不大不小接收buffer，通过Handle扩展实现
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">RecvByteBufAllocator</span>.<span style="color:#a6e22e">Handle</span> allocHandle <span style="color:#f92672">=</span> recvBufAllocHandle();
+    allocHandle.<span style="color:#a6e22e">reset</span>(config);
+
+    ByteBuf <span style="color:#a6e22e">byteBuf</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+    <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">close</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">false</span>;
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#66d9ef">do</span> {
+            <span style="color:#75715e">// 分配buffer，主要由于两种方式： fixed和adaptive，具体区别主要在guess()，record方法
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// adaptive：record方法，根据此次读取的字节数预判调整下一次buffer的大小。查看record方法发现：
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// 缩小容量需要连续两次低于当前容量，增加只要一次。
+</span><span style="color:#75715e"></span>            byteBuf <span style="color:#f92672">=</span> allocHandle.<span style="color:#a6e22e">allocate</span>(allocator);
+            <span style="color:#75715e">// 记录最新的读取，方便调整buffer以及判断读取是否结束
+</span><span style="color:#75715e"></span>            allocHandle.<span style="color:#a6e22e">lastBytesRead</span>(doReadBytes(byteBuf));
+            <span style="color:#66d9ef">if</span> (allocHandle.<span style="color:#a6e22e">lastBytesRead</span>() <span style="color:#f92672">&lt;=</span> 0) {
+                <span style="color:#75715e">// nothing was read. release the buffer.
+</span><span style="color:#75715e"></span>                byteBuf.<span style="color:#a6e22e">release</span>();
+                byteBuf <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+                close <span style="color:#f92672">=</span> allocHandle.<span style="color:#a6e22e">lastBytesRead</span>() <span style="color:#f92672">&lt;</span> 0;
+                <span style="color:#66d9ef">if</span> (close) {
+                    <span style="color:#75715e">// There is nothing left to read as we received an EOF.
+</span><span style="color:#75715e"></span>                    readPending <span style="color:#f92672">=</span> <span style="color:#66d9ef">false</span>;
+                }
+                <span style="color:#66d9ef">break</span>;
+            }
+
+            allocHandle.<span style="color:#a6e22e">incMessagesRead</span>(1);
+            <span style="color:#75715e">// 这个标志主要是为了清除op_read存在的。防止read请求丢失
+</span><span style="color:#75715e"></span>            readPending <span style="color:#f92672">=</span> <span style="color:#66d9ef">false</span>;
+            <span style="color:#75715e">// read一次消息触发一次ChannelRead，消息有可能拆/粘包了，首先需要触发decode?
+</span><span style="color:#75715e"></span>            pipeline.<span style="color:#a6e22e">fireChannelRead</span>(byteBuf);
+            <span style="color:#75715e">// 释放资源
+</span><span style="color:#75715e"></span>            byteBuf <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+            <span style="color:#75715e">// 判断是否需要继续read
+</span><span style="color:#75715e"></span>        } <span style="color:#66d9ef">while</span> (allocHandle.<span style="color:#a6e22e">continueReading</span>());
+
+        allocHandle.<span style="color:#a6e22e">readComplete</span>();
+        pipeline.<span style="color:#a6e22e">fireChannelReadComplete</span>();
+
+        <span style="color:#66d9ef">if</span> (close) {
+            closeOnRead(pipeline);
+        }
+    } <span style="color:#66d9ef">catch</span> (Throwable <span style="color:#a6e22e">t</span>) {
+        handleReadException(pipeline, byteBuf, t, close, allocHandle);
+    } <span style="color:#66d9ef">finally</span> {
+        <span style="color:#75715e">// 注释说的很清楚了，当AutoRead为false时，想要清除op_read，需检测属否有正在等待的读，有两种情况：
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// Check if there is a readPending which was not processed yet.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// This could be for two reasons:
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// * The user called Channel.read() or ChannelHandlerContext.read() in channelRead(...) method
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// * The user called Channel.read() or ChannelHandlerContext.read() in channelReadComplete(...) method
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// 如果不这样做，会导致等待的读无法完成，即Channel.read()无效。
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// See https://github.com/netty/netty/issues/2254
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>readPending <span style="color:#f92672">&amp;&amp;</span> <span style="color:#f92672">!</span>config.<span style="color:#a6e22e">isAutoRead</span>()) {
+            removeReadOp();
+        }
+    }
+}</code></pre></div>
+<h3 id="3-5-niomessageunsafe">3.5 NioMessageUnsafe</h3>
+
+<h4 id="3-5-1-read">3.5.1 read()</h4>
+
+<p>与 <code>NioByteUnsafe.read()</code> 大同小异，具体在于读取的消息。<code>doReadMessages(List &lt;Object&gt;)</code>channel扩展，读取Object，有可能是channel，也有可能是packet。</p>
+
+<h2 id="4-小结">4 小结</h2>
+
+<p>channel总体可以划分成<strong>server</strong>和<strong>client</strong>两类。其实现了多种传输层协议，如TCP，UDP，SCTP等，多个I/O模型，如NIO，BIO等。</p>
+
+<p>server channel一般只是accept连接，生成client channel，由client channel处理消息。</p>
+
+<p>在以上的源码中，我主要对其I/O操作进行了简单解析。可以发现，Channel实际上是调用内部聚合的Unsafe中的方法实现网络I/O，Channel只是为真正的I/O做好准备以及提供事件扩展。</p></article>
+
+      
+
+      
+    </div>
+
+    
+  
+
+  <aside class="book-toc levels-3 fixed">
+    <nav id="TableOfContents">
+<ul>
+<li>
+<ul>
+<li><a href="#0-目录">0 目录</a></li>
+<li><a href="#1-简介">1 简介</a></li>
+<li><a href="#2-channel">2 Channel</a>
+<ul>
+<li><a href="#2-1-主要api">2.1 主要api</a></li>
+<li><a href="#2-2-abstractchannel">2.2 AbstractChannel</a></li>
+<li><a href="#2-3-abstractniochannel">2.3 AbstractNioChannel</a>
+<ul>
+<li><a href="#2-3-1-doregister">2.3.1 doRegister()</a></li>
+<li><a href="#2-3-2-dobeginread">2.3.2 doBeginRead()</a></li>
+</ul></li>
+<li><a href="#2-4-abstractniomessagechannel">2.4 AbstractNioMessageChannel</a>
+<ul>
+<li><a href="#2-4-1-dowrite-channeloutboundbuffer">2.4.1 doWrite(ChannelOutboundBuffer)</a></li>
+</ul></li>
+<li><a href="#2-5-nioserversocketchannel">2.5 NioServerSocketChannel</a>
+<ul>
+<li><a href="#2-5-1-nioserversocketchannel-serversocketchannel">2.5.1 NioServerSocketChannel(ServerSocketChannel)</a></li>
+<li><a href="#2-5-2-dobind-socketaddress">2.5.2 doBind(SocketAddress)</a></li>
+<li><a href="#2-5-3-doreadmessages-list-object">2.5.3 doReadMessages(List&lt; Object &gt;)</a></li>
+</ul></li>
+<li><a href="#2-6-abstractniobytechannel">2.6 AbstractNioByteChannel</a>
+<ul>
+<li><a href="#2-6-1-abstractniobytechannel-channel-selectablechannel">2.6.1 AbstractNioByteChannel(Channel, SelectableChannel)</a></li>
+<li><a href="#2-6-2-dowriteinternal-channeloutboundbuffer-object">2.6.2 doWriteInternal(ChannelOutboundBuffer, Object)</a></li>
+<li><a href="#2-6-3-dowrite-channeloutboundbuffer">2.6.3 doWrite(ChannelOutboundBuffer)</a></li>
+</ul></li>
+<li><a href="#2-7-niosocketchannel">2.7 NioSocketChannel</a>
+<ul>
+<li><a href="#2-7-1-doconnect-socketaddress-socketaddress">2.7.1 doConnect(SocketAddress, SocketAddress)</a></li>
+<li><a href="#2-7-2-dowrite-channeloutboundbuffer">2.7.2 doWrite(ChannelOutboundBuffer)</a></li>
+<li><a href="#2-7-3-channeloutboundbuffer-removebytes-long">2.7.3 ChannelOutboundBuffer.removeBytes(long)</a></li>
+</ul></li>
+</ul></li>
+<li><a href="#3-unsafe">3 Unsafe</a>
+<ul>
+<li><a href="#3-1-api">3.1 api</a></li>
+<li><a href="#3-2-abstractunsafe">3.2 AbstractUnsafe</a>
+<ul>
+<li><a href="#3-2-1-register-eventloop-final-channelpromise">3.2.1 register(EventLoop, final ChannelPromise)</a></li>
+<li><a href="#3-2-2-write-object-channelpromise">3.2.2 write(Object, ChannelPromise)</a></li>
+<li><a href="#3-2-3-flush">3.2.3 flush()</a></li>
+</ul></li>
+<li><a href="#3-3-abstractniounsafe">3.3 AbstractNioUnsafe</a>
+<ul>
+<li><a href="#3-3-1-connect-final-socketaddress-final-socketaddress-final-channelpromise">3.3.1 connect(final SocketAddress, final SocketAddress, final ChannelPromise)</a></li>
+</ul></li>
+<li><a href="#3-4-niobyteunsafe">3.4 NioByteUnsafe</a>
+<ul>
+<li><a href="#3-4-1-read">3.4.1 read()</a></li>
+</ul></li>
+<li><a href="#3-5-niomessageunsafe">3.5 NioMessageUnsafe</a>
+<ul>
+<li><a href="#3-5-1-read">3.5.1 read()</a></li>
+</ul></li>
+</ul></li>
+<li><a href="#4-小结">4 小结</a></li>
+</ul></li>
+</ul>
+</nav>
+  </aside>
+
+
+
+  </main>
+
+  
+</body>
+
+</html>

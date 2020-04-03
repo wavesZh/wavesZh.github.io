@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><meta property="og:title" content="深入理解JUC：ThreadPoolExecutor" />
+<meta property="og:description" content="线程池是 JUC 的核心组件之一，简化了并发执行的实现，使得我们不需要关心线程的管理以及任务分配，只需要向池里丢任务就行了。ThreadPoolExecutor 是线程池的核心实现。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://waveszh.github.io/posts/juc-thread_pool_executor/" />
+<meta property="article:published_time" content="2020-01-20T18:05:11+08:00" />
+<meta property="article:modified_time" content="2020-01-20T18:05:11+08:00" />
+<title>深入理解JUC：ThreadPoolExecutor | X-Y-Z</title>
+<link rel="icon" href="/favicon.png" type="image/x-icon">
+
+
+<link rel="stylesheet" href="/book.min.a5976c405dae433d8f29b44570050888016c89d73d4734909e982c645bbb4d05.css" integrity="sha256-pZdsQF2uQz2PKbRFcAUIiAFsidc9RzSQnpgsZFu7TQU=">
+
+
+<script defer src="/search.min.4b5374ff6744223ff0adad18171a251385303ccb9ef225664aea3b0e539578fd.js" integrity="sha256-S1N0/2dEIj/wra0YFxolE4UwPMue8iVmSuo7DlOVeP0="></script>
+
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+  
+</head>
+
+<body>
+  <input type="checkbox" class="hidden" id="menu-control" />
+  <main class="flex container">
+
+    <aside class="book-menu fixed">
+      <nav>
+<h2 class="book-brand">
+  <a href="https://waveszh.github.io/"><span>X-Y-Z</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" placeholder="Search" id="book-search-input" maxlength="64" />
+  <div class="book-search-spinner spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+    <ul>
+<li><a href="/posts/"><strong>Blog</strong></a></li>
+</ul>
+
+
+
+
+
+</nav>
+
+
+<script>
+(function() {
+  var menu = document.querySelector("aside.book-menu nav");
+  addEventListener("beforeunload", function(event) {
+    localStorage.setItem("menu.scrollTop", menu.scrollTop);
+  });
+  menu.scrollTop = localStorage.getItem("menu.scrollTop");
+})();
+</script>
+
+    </aside>
+
+    <div class="book-posts">
+      <header class="flex align-center justify-between book-header">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" alt="Menu" />
+  </label>
+  <strong>深入理解JUC：ThreadPoolExecutor</strong>
+</header>
+
+      
+
+<header class="markdown">
+  <h1>深入理解JUC：ThreadPoolExecutor</h1>
+  <h5>
+    <strong>Jan 20, 2020</strong>
+  </h5>
+</header>
+<article class="markdown"><p>线程池是 JUC 的核心组件之一，简化了并发执行的实现，使得我们不需要关心线程的管理以及任务分配，只需要向池里丢任务就行了。<code>ThreadPoolExecutor</code> 是线程池的核心实现。</p>
+
+<h2 id="1-核心思路">1. 核心思路</h2>
+
+<p><code>ThreadPoolExecutor</code> 其实就是 <strong>生产-消费者</strong> 模式的实现。生产和消费动作通过内部的阻塞队列解耦。</p>
+
+<h3 id="1-1-运行状态">1.1 运行状态</h3>
+
+<p>通过 <code>ctl</code> 字段管理线程数量以及池的运行状态。 <code>ctl</code> 是 <code>AtomicInteger</code> 类型，int 原子操作类。高3位表示 <strong>runState</strong> 运行状态，低29位表示 <strong>workerCount</strong> 工作线程数，最大值为 2^29-1。</p>
+
+<p><strong>runState</strong> 提供生命周期的控制：</p>
+
+<ul>
+<li>RUNNING：可以接收新任务以及处理队列中的任务。-1 &lt;&lt; COUNT_BITS</li>
+<li>SHUTDOWN：不可以接收新任务，但可以处理队列中的任务。0 &lt;&lt; COUNT_BITS</li>
+<li>STOP：不可以接收新任务以及处理队列中的任务，并且中断正在处理的任务。1 &lt;&lt; COUNT_BITS</li>
+<li>TIDYING：所有任务已经终止且工作线程数为0，之后会调用 <code>terminated()</code> 方法。2 &lt;&lt; COUNT_BITS</li>
+<li>TERMINATED：<code>terminated()</code> 方法执行完后。3 &lt;&lt; COUNT_BITS</li>
+</ul>
+
+<p>RUNNING -&gt; SHUTDOWN：<code>shutdown()</code> 方法或者 <code>finalize()</code> 方法
+(RUNNING OR SHUTDOWN) -&gt; STOP：<code>shutdownNow()</code> 方法
+STOP -&gt; TIDYING：<code>tryTerminate()</code> 方法，当任务全部终止且工作线程数为0
+TIDYING -&gt; TERMINATED：<code>tryTerminate()</code> 方法，当 <code>terminated()</code> 方法执行完后</p>
+
+<p>以上状态的大小排序是递增的，以便根据大小进行状态流转判断。</p>
+
+<h3 id="1-2-线程数量">1.2 线程数量</h3>
+
+<p><code>corePoolSize</code> 和 <code>maximumPoolSize</code> 字段限制了线程池中线程数量。<code>maximumPoolSize</code> 限制了线程池中允许存在线程的最大数量。超出 <code>corePoolSize</code> 数量的线程如果 <code>keepAliveTime</code> 时间内空闲则线程结束。<code>allowCoreThreadTimeOut</code> 默认是 false，<code>corePoolSize</code> 数量的线程会常驻池内，否则也将根据空闲时间进行结束。</p>
+
+<h3 id="1-3-阻塞队列">1.3 阻塞队列</h3>
+
+<p><code>workQueue</code> 字段的类型是 <code>BlockingQueue&lt;Runnable&gt;</code>。为什么需要阻塞队列呢？</p>
+
+<ol>
+<li>队列：存放待处理的任务，是实现生产-消费的关键；</li>
+<li>阻塞：通过设置队列的大小限制允许存储任务的数量。</li>
+</ol>
+
+<h3 id="1-4-拒绝策略">1.4 拒绝策略</h3>
+
+<p>由于工作线程和阻塞队列的数量限制或者 <code>shutdown</code> 后，有些任务不能执行，则需要 <code>RejectedExecutionHandler</code> 用于处理这些任务。</p>
+
+<h2 id="2-源码解析">2. 源码解析</h2>
+
+<h3 id="2-1-提交任务">2.1 提交任务</h3>
+
+<p>提交任务的方法有 <code>execute</code> 和 <code>submit</code>。<code>submit</code> 方法最终还是依托于 <code>execute</code> 方法实现。接下来介绍些 <code>execute</code> 方法：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> execute(Runnable <span style="color:#a6e22e">command</span>) {
+    <span style="color:#66d9ef">if</span> (command <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>)
+        <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> NullPointerException();
+        
+     <span style="color:#75715e">// 获取 ctrl 状态控制量
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">c</span> <span style="color:#f92672">=</span> ctl.<span style="color:#a6e22e">get</span>();
+    <span style="color:#75715e">// 1. 工作线程数量 &lt; corePoolSize
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (workerCountOf(c) <span style="color:#f92672">&lt;</span> corePoolSize) {
+        <span style="color:#75715e">// 尝试增加新的 core worker 并让其执行任务
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// 成功后退出，否则重新获取 ctrl
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (addWorker(command, <span style="color:#66d9ef">true</span>))
+            <span style="color:#66d9ef">return</span>;
+        c <span style="color:#f92672">=</span> ctl.<span style="color:#a6e22e">get</span>();
+    }
+    <span style="color:#75715e">// executor 是否运行 &amp;&amp; 阻塞队列是否还可以容纳新任务
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (isRunning(c) <span style="color:#f92672">&amp;&amp;</span> workQueue.<span style="color:#a6e22e">offer</span>(command)) {
+        <span style="color:#75715e">// 重新获取 ctrl
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">recheck</span> <span style="color:#f92672">=</span> ctl.<span style="color:#a6e22e">get</span>();
+        <span style="color:#75715e">// executor 是否运行，如果运行，则从阻塞队列中剔除该任务 
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span> isRunning(recheck) <span style="color:#f92672">&amp;&amp;</span> remove(command))
+            <span style="color:#75715e">// 执行拒绝策略
+</span><span style="color:#75715e"></span>            reject(command);
+        <span style="color:#75715e">// 增加非 core worker    
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">else</span> <span style="color:#66d9ef">if</span> (workerCountOf(recheck) <span style="color:#f92672">==</span> 0)
+            addWorker(<span style="color:#66d9ef">null</span>, <span style="color:#66d9ef">false</span>);
+    }
+    <span style="color:#75715e">// 尝试增加非 core worker     
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">else</span> <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>addWorker(command, <span style="color:#66d9ef">false</span>))
+        <span style="color:#75715e">// 新增失败则执行拒绝策略
+</span><span style="color:#75715e"></span>        reject(command);
+}</code></pre></div>
+<p>以上方法主要有3步：</p>
+
+<ol>
+<li>当 workerCount 小于 corePoolSize 时，尝试新增 core 工作线程并交予任务。</li>
+<li>当 executor 运行且任务可以放入 workQueue 时，二次检测 executor 运行状态。</li>
+<li>当任务无法放入 workqueue 中，增尝试新增非 core 工作线程，失败则执行拒绝策略。</li>
+</ol>
+
+<p>以上是大体处理任务流程</p>
+
+<h3 id="2-2-新增工作线程">2.2 新增工作线程</h3>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">boolean</span> addWorker(Runnable <span style="color:#a6e22e">firstTask</span>, <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">core</span>) {
+    <span style="color:#75715e">// 特殊跳转语法，不推荐使用
+</span><span style="color:#75715e"></span>    retry<span style="color:#f92672">:</span>
+    <span style="color:#75715e">// cas 修改 workerCount
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">for</span> (;;) {
+        <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">c</span> <span style="color:#f92672">=</span> ctl.<span style="color:#a6e22e">get</span>();
+        <span style="color:#75715e">// 运行状态
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">rs</span> <span style="color:#f92672">=</span> runStateOf(c);
+
+        <span style="color:#75715e">// rs == SHUTDOWN &amp;&amp; firstTask != null
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// rs == SHUTDOWN &amp;&amp; workQueue.isEmpty()
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// rs &gt; SHUTDOWN 
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (rs <span style="color:#f92672">&gt;=</span> SHUTDOWN <span style="color:#f92672">&amp;&amp;</span>
+            <span style="color:#f92672">!</span> (rs <span style="color:#f92672">==</span> SHUTDOWN <span style="color:#f92672">&amp;&amp;</span>
+               firstTask <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">&amp;&amp;</span>
+               <span style="color:#f92672">!</span> workQueue.<span style="color:#a6e22e">isEmpty</span>()))
+            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
+
+        <span style="color:#66d9ef">for</span> (;;) {
+            <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">wc</span> <span style="color:#f92672">=</span> workerCountOf(c);
+            <span style="color:#75715e">// 工作线程数超过限制，直接退出 false
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (wc <span style="color:#f92672">&gt;=</span> CAPACITY <span style="color:#f92672">||</span>
+                wc <span style="color:#f92672">&gt;=</span> (core <span style="color:#f92672">?</span> corePoolSize <span style="color:#f92672">:</span> maximumPoolSize))
+                <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
+            <span style="color:#75715e">// cas 修改 workerCount
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (compareAndIncrementWorkerCount(c))
+                <span style="color:#66d9ef">break</span> retry;
+            c <span style="color:#f92672">=</span> ctl.<span style="color:#a6e22e">get</span>();  
+            <span style="color:#75715e">// 二次检查 cas + loop
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (runStateOf(c) <span style="color:#f92672">!=</span> rs)
+                <span style="color:#66d9ef">continue</span> retry;
+            <span style="color:#75715e">// 由于工作线程数量发生改变，重试    
+</span><span style="color:#75715e"></span>        }
+    }
+    <span style="color:#75715e">// 创建并启动 worker
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">workerStarted</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">false</span>;
+    <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">workerAdded</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">false</span>;
+    Worker <span style="color:#a6e22e">w</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+    <span style="color:#66d9ef">try</span> {
+        w <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> Worker(firstTask);
+        <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">Thread</span> t <span style="color:#f92672">=</span> w.<span style="color:#a6e22e">thread</span>;
+        <span style="color:#66d9ef">if</span> (t <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>) {
+            <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">ReentrantLock</span> mainLock <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">mainLock</span>;
+            mainLock.<span style="color:#a6e22e">lock</span>();
+            <span style="color:#66d9ef">try</span> {
+                <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">rs</span> <span style="color:#f92672">=</span> runStateOf(ctl.<span style="color:#a6e22e">get</span>());
+                <span style="color:#75715e">// 对比上面，rs == SHUTDOWN &amp;&amp; workQueue.isEmpty() 不允许启动线程
+</span><span style="color:#75715e"></span>                <span style="color:#66d9ef">if</span> (rs <span style="color:#f92672">&lt;</span> SHUTDOWN <span style="color:#f92672">||</span>
+                    (rs <span style="color:#f92672">==</span> SHUTDOWN <span style="color:#f92672">&amp;&amp;</span> firstTask <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>)) {
+                    <span style="color:#66d9ef">if</span> (t.<span style="color:#a6e22e">isAlive</span>()) 
+                        <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> IllegalThreadStateException();
+                    workers.<span style="color:#a6e22e">add</span>(w);
+                    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">s</span> <span style="color:#f92672">=</span> workers.<span style="color:#a6e22e">size</span>();
+                    <span style="color:#75715e">// 记录 largestPoolSize 历史最大线程数
+</span><span style="color:#75715e"></span>                    <span style="color:#66d9ef">if</span> (s <span style="color:#f92672">&gt;</span> largestPoolSize)
+                        largestPoolSize <span style="color:#f92672">=</span> s;
+                    workerAdded <span style="color:#f92672">=</span> <span style="color:#66d9ef">true</span>;
+                }
+            } <span style="color:#66d9ef">finally</span> {
+                mainLock.<span style="color:#a6e22e">unlock</span>();
+            }
+            <span style="color:#66d9ef">if</span> (workerAdded) {
+                <span style="color:#75715e">// 启动线程
+</span><span style="color:#75715e"></span>                t.<span style="color:#a6e22e">start</span>();
+                workerStarted <span style="color:#f92672">=</span> <span style="color:#66d9ef">true</span>;
+            }
+        }
+    } <span style="color:#66d9ef">finally</span> {
+        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span> workerStarted)
+            addWorkerFailed(w);
+    }
+    <span style="color:#66d9ef">return</span> workerStarted;
+}</code></pre></div>
+<p>新增工作线程主要有两个步骤：</p>
+
+<ol>
+<li>修改工作线程数量</li>
+<li>新增并启动工作线程</li>
+</ol>
+
+<p>修改工作线程数量的前提条件，满足其中一个条件即可：</p>
+
+<ol>
+<li>rs &lt; SHUTDOWN</li>
+<li>rs == SHUTDOWN &amp;&amp; firstTask == null &amp;&amp; !workQueue.isEmpty()</li>
+</ol>
+
+<p>SHUTDOWN 状态下，不允许新增任务，但可以执行队列中的任务。
+firstTask != null，违反 “不允许新增任务”；
+workQueue.isEmpty()，既然无待执行的任务，则没有必要 addWorker</p>
+
+<p>启动工作线程的前提条件跟以上类似，只是缺少了 <strong>&amp; !workQueue.isEmpty()</strong>。逻辑问题而已，如果 <code>rs == SHUTDOWN &amp;&amp; firstTask == null &amp;&amp; !workQueue.isEmpty()</code> 成立， 那么 <code>rs == SHUTDOWN &amp;&amp; firstTask == null</code> 一定也成立。</p>
+
+<h3 id="2-3-任务执行">2.3 任务执行</h3>
+
+<p>任务丢进 workQueue 中后等待 <code>Worker</code> 消费执行。 任务执行的方法为 <code>final void runWorker(Worker w)</code>。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">final</span> <span style="color:#a6e22e">void</span> runWorker(Worker <span style="color:#a6e22e">w</span>) {
+    Thread <span style="color:#a6e22e">wt</span> <span style="color:#f92672">=</span> Thread.<span style="color:#a6e22e">currentThread</span>();
+    Runnable <span style="color:#a6e22e">task</span> <span style="color:#f92672">=</span> w.<span style="color:#a6e22e">firstTask</span>;
+    w.<span style="color:#a6e22e">firstTask</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+    <span style="color:#75715e">// unlock() 允许中断，可查看 interruptIdleWorkers 方法
+</span><span style="color:#75715e"></span>    w.<span style="color:#a6e22e">unlock</span>();
+    <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">completedAbruptly</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">true</span>;
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#75715e">// 当没有待执行的任务时候，退出循环
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">while</span> (task <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">||</span> (task <span style="color:#f92672">=</span> getTask()) <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>) {
+            <span style="color:#75715e">// interruptIdleWorkers 方法无法中断已锁线程
+</span><span style="color:#75715e"></span>            w.<span style="color:#a6e22e">lock</span>();
+            <span style="color:#75715e">// 检查线程的中断标志位。如线程池关闭，则需要确保中断标志位有效；如果状态&lt;STOP, 则清除中断标志位。然而为了处理
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// shutdownNow 方法与此时清除标志位的竞争问题，再次检查状态。确保中断标志位的准确性。
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> ((runStateAtLeast(ctl.<span style="color:#a6e22e">get</span>(), STOP) <span style="color:#f92672">||</span>
+                 (Thread.<span style="color:#a6e22e">interrupted</span>() <span style="color:#f92672">&amp;&amp;</span>
+                  runStateAtLeast(ctl.<span style="color:#a6e22e">get</span>(), STOP))) <span style="color:#f92672">&amp;&amp;</span>
+                <span style="color:#f92672">!</span>wt.<span style="color:#a6e22e">isInterrupted</span>())
+                <span style="color:#75715e">// 线程池关闭，设置中断标志位
+</span><span style="color:#75715e"></span>                wt.<span style="color:#a6e22e">interrupt</span>();
+            <span style="color:#66d9ef">try</span> {
+                <span style="color:#75715e">// before 回调
+</span><span style="color:#75715e"></span>                beforeExecute(wt, task);
+                <span style="color:#75715e">// 记录任务处理异常以便处理
+</span><span style="color:#75715e"></span>                Throwable <span style="color:#a6e22e">thrown</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+                <span style="color:#66d9ef">try</span> {
+                    <span style="color:#75715e">// 执行任务
+</span><span style="color:#75715e"></span>                    task.<span style="color:#a6e22e">run</span>();
+                } <span style="color:#66d9ef">catch</span> (RuntimeException <span style="color:#a6e22e">x</span>) {
+                    thrown <span style="color:#f92672">=</span> x; <span style="color:#66d9ef">throw</span> x;
+                } <span style="color:#66d9ef">catch</span> (Error <span style="color:#a6e22e">x</span>) {
+                    thrown <span style="color:#f92672">=</span> x; <span style="color:#66d9ef">throw</span> x;
+                } <span style="color:#66d9ef">catch</span> (Throwable <span style="color:#a6e22e">x</span>) {
+                    thrown <span style="color:#f92672">=</span> x; <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> Error(x);
+                } <span style="color:#66d9ef">finally</span> {
+                    <span style="color:#75715e">// after 回调
+</span><span style="color:#75715e"></span>                    afterExecute(task, thrown);
+                }
+            } <span style="color:#66d9ef">finally</span> {
+                task <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+                <span style="color:#75715e">// 记录完成任务数
+</span><span style="color:#75715e"></span>                w.<span style="color:#a6e22e">completedTasks</span><span style="color:#f92672">++</span>;
+                w.<span style="color:#a6e22e">unlock</span>();
+            }
+        }
+        <span style="color:#75715e">// completedAbruptly 是否有由于异常抛出退出
+</span><span style="color:#75715e"></span>        completedAbruptly <span style="color:#f92672">=</span> <span style="color:#66d9ef">false</span>;
+    } <span style="color:#66d9ef">finally</span> {  
+        processWorkerExit(w, completedAbruptly);
+    }
+}</code></pre></div>
+<p><code>w.unlock()</code> 代表者允许中断，具体解析将在 <strong>线程池关闭</strong> 章节说明。</p>
+
+<p>方法开启 while 循环执行待完成的任务，直至任务发生异常或者 <code>task==null</code> 时退出，即 worker 死亡。</p>
+
+<p>何时会发生 <code>task==null</code>，具体逻辑在 <code>getTask()</code> 方法：</p>
+
+<ol>
+<li><code>rs &gt;= SHUTDOWN &amp;&amp; (rs &gt;= STOP || workQueue.isEmpty()))</code> 成立。</li>
+<li><code>(wc &gt; maximumPoolSize || (timed &amp;&amp; timedOut))
+            &amp;&amp; (wc &gt; 1 || workQueue.isEmpty())
+            &amp;&amp; compareAndDecrementWorkerCount(c)</code> 成立。</li>
+</ol>
+
+<p>第一点根据 <code>SHUTDOWN</code> 和 <code>STOP</code> 状态的含义很好理解。<code>SHUTDOWN</code> 允许继续消费队列中的任务，当队列中没有任务时，返回 null; <code>STOP</code> 则不允许，立即返回 null。
+第二点主要是关于 worker 数量的控制，如 worker 数量超过 maximumPoolSize，则需要销毁多余的 worker。为了避免并发修改冲突，采用 CAS 的方式修改 worker 数量。但是销毁前须确保 workQueue 中剩余任务待完成。</p>
+
+<p>再看看其中的异常处理。异常包括用户异常和线程池内部异常。线程池内部异常都内部 catch，没有向外 throw。如 <code>InterruptedException</code>，此异常一般在线程池关闭时发生，具体可看 <code>getTask()</code> 方法。用户异常处理，将异常抛出，如为隐式异常需包装成显式异常，最终调用 <code>processWorkerExit</code> 方法后，worker 死亡。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">void</span> processWorkerExit(Worker <span style="color:#a6e22e">w</span>, <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">completedAbruptly</span>) {
+ 		<span style="color:#75715e">// completedAbruptly 表示由于用户异常导致的退出
+</span><span style="color:#75715e"></span>		<span style="color:#66d9ef">if</span> (completedAbruptly) 
+        decrementWorkerCount();
+		<span style="color:#75715e">// 操作 workers。从 workers 中剔除
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">ReentrantLock</span> mainLock <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">mainLock</span>;
+    mainLock.<span style="color:#a6e22e">lock</span>();
+    <span style="color:#66d9ef">try</span> {
+        completedTaskCount <span style="color:#f92672">+=</span> w.<span style="color:#a6e22e">completedTasks</span>;
+        workers.<span style="color:#a6e22e">remove</span>(w);
+    } <span style="color:#66d9ef">finally</span> {
+        mainLock.<span style="color:#a6e22e">unlock</span>();
+    }
+		<span style="color:#75715e">// 尝试将状态变更为 Terminate
+</span><span style="color:#75715e"></span>    tryTerminate();
+
+    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">c</span> <span style="color:#f92672">=</span> ctl.<span style="color:#a6e22e">get</span>();
+  	<span style="color:#75715e">// 是否正常运行
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (runStateLessThan(c, STOP)) {
+        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>completedAbruptly) {
+          	<span style="color:#75715e">// 内部异常处理，如果 worker 数量没有小于最低标准，需增加 worker
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">min</span> <span style="color:#f92672">=</span> allowCoreThreadTimeOut <span style="color:#f92672">?</span> 0 <span style="color:#f92672">:</span> corePoolSize;
+            <span style="color:#66d9ef">if</span> (min <span style="color:#f92672">==</span> 0 <span style="color:#f92672">&amp;&amp;</span> <span style="color:#f92672">!</span> workQueue.<span style="color:#a6e22e">isEmpty</span>())
+                min <span style="color:#f92672">=</span> 1;
+            <span style="color:#66d9ef">if</span> (workerCountOf(c) <span style="color:#f92672">&gt;=</span> min)
+                <span style="color:#66d9ef">return</span>; <span style="color:#75715e">// replacement not needed
+</span><span style="color:#75715e"></span>        }
+      	<span style="color:#75715e">// 增加 worker
+</span><span style="color:#75715e"></span>        addWorker(<span style="color:#66d9ef">null</span>, <span style="color:#66d9ef">false</span>);
+    }
+}</code></pre></div>
+<p>从上可知：</p>
+
+<ol>
+<li><p>由用户异常导致 worker 死亡，线程池如正常运行则会重新新增一个 worker。</p></li>
+
+<li><p>由内部异常导致 worker 死亡，线程池会根据 worker pool 最低标准来决定是否新增 worker。、</p></li>
+</ol>
+
+<h3 id="2-4-线程池关闭">2.4 线程池关闭</h3>
+
+<p>线程池关闭有两个方法： <code>shutdown</code> 方法和 <code>shutdownNow</code> 方法。以上方法都只是尝试关闭，并不保证立即生效。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> shutdown() {
+    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">ReentrantLock</span> mainLock <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">mainLock</span>;
+    mainLock.<span style="color:#a6e22e">lock</span>();
+    <span style="color:#66d9ef">try</span> {
+      	<span style="color:#75715e">// 检查 modifyThread 权限
+</span><span style="color:#75715e"></span>        checkShutdownAccess();
+      	<span style="color:#75715e">// 修改状态为 SHUTDOWN
+</span><span style="color:#75715e"></span>        advanceRunState(SHUTDOWN);
+      	<span style="color:#75715e">// 中断空闲的 worker
+</span><span style="color:#75715e"></span>        interruptIdleWorkers();
+      	<span style="color:#75715e">// shutdown 回调
+</span><span style="color:#75715e"></span>        onShutdown(); <span style="color:#75715e">// hook for ScheduledThreadPoolExecutor
+</span><span style="color:#75715e"></span>    } <span style="color:#66d9ef">finally</span> {
+        mainLock.<span style="color:#a6e22e">unlock</span>();
+    }
+  	<span style="color:#75715e">// 尝试修改状态为 Terminate
+</span><span style="color:#75715e"></span>    tryTerminate();
+}</code></pre></div>
+<p><code>shutdownNow</code> 方法类似，就不贴了，套路如下：</p>
+
+<ol>
+<li>检查 modifyThread 权限</li>
+<li>修改 pool 状态</li>
+<li>中断 worker</li>
+<li>tryTerminate</li>
+</ol>
+
+<table>
+<thead>
+<tr>
+<th>方法名称</th>
+<th>状态变更</th>
+<th>线程中断</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td><code>shutdown</code></td>
+<td>SHUTDOWN</td>
+<td>中断正在等待任务的线程</td>
+</tr>
+
+<tr>
+<td><code>shutdownNow</code></td>
+<td>STOP</td>
+<td>中断所有线程</td>
+</tr>
+</tbody>
+</table>
+
+<p>中断正在等待任务的线程</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">void</span> interruptIdleWorkers(<span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">onlyOne</span>) {
+    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">ReentrantLock</span> mainLock <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">mainLock</span>;
+    mainLock.<span style="color:#a6e22e">lock</span>();
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#66d9ef">for</span> (Worker <span style="color:#a6e22e">w</span> <span style="color:#f92672">:</span> workers) {
+            Thread <span style="color:#a6e22e">t</span> <span style="color:#f92672">=</span> w.<span style="color:#a6e22e">thread</span>;
+          	<span style="color:#75715e">//	是否已经中断过 &amp;&amp; 是否允许中断
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>t.<span style="color:#a6e22e">isInterrupted</span>() <span style="color:#f92672">&amp;&amp;</span> w.<span style="color:#a6e22e">tryLock</span>()) {
+                <span style="color:#66d9ef">try</span> {
+                    t.<span style="color:#a6e22e">interrupt</span>();
+                } <span style="color:#66d9ef">catch</span> (SecurityException <span style="color:#a6e22e">ignore</span>) {
+                } <span style="color:#66d9ef">finally</span> {
+                    w.<span style="color:#a6e22e">unlock</span>();
+                }
+            }
+            <span style="color:#66d9ef">if</span> (onlyOne)
+                <span style="color:#66d9ef">break</span>;
+        }
+    } <span style="color:#66d9ef">finally</span> {
+        mainLock.<span style="color:#a6e22e">unlock</span>();
+    }
+}</code></pre></div>
+<p>该方法如何判断空闲线程呢？ 关键在于 <code>w.tryLock()</code>。这跟 <code>runWorker</code> 方法中的 <code>w.lock()</code> 对应起来了。当调用  <code>w.lock()</code> 时，说明 worker 已经通过 <code>getTask</code> 方法获取到任务，以上的 <code>t.interrupt()</code> 无法执行。</p>
+
+<p>通过 <code>t.interrupt()</code> 可以标志 worker 需要中断了，但需要有中断响应的途径。如果 worker 阻塞在 <code>workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS)</code> ，如果 workQueue 没有实现中断响应，也是只能乖乖等待超时。</p></article>
+
+      
+
+      
+    </div>
+
+    
+  
+
+  <aside class="book-toc levels-3 fixed">
+    <nav id="TableOfContents">
+<ul>
+<li>
+<ul>
+<li><a href="#1-核心思路">1. 核心思路</a>
+<ul>
+<li><a href="#1-1-运行状态">1.1 运行状态</a></li>
+<li><a href="#1-2-线程数量">1.2 线程数量</a></li>
+<li><a href="#1-3-阻塞队列">1.3 阻塞队列</a></li>
+<li><a href="#1-4-拒绝策略">1.4 拒绝策略</a></li>
+</ul></li>
+<li><a href="#2-源码解析">2. 源码解析</a>
+<ul>
+<li><a href="#2-1-提交任务">2.1 提交任务</a></li>
+<li><a href="#2-2-新增工作线程">2.2 新增工作线程</a></li>
+<li><a href="#2-3-任务执行">2.3 任务执行</a></li>
+<li><a href="#2-4-线程池关闭">2.4 线程池关闭</a></li>
+</ul></li>
+</ul></li>
+</ul>
+</nav>
+  </aside>
+
+
+
+  </main>
+
+  
+</body>
+
+</html>

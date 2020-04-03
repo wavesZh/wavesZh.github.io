@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><meta property="og:title" content="Netty Codec" />
+<meta property="og:description" content="Codec是编解码器，用于数据格式的转换。在网络通信中，底层都是通过字节流交互。故在Netty中需要实现应用程序的数据与字节流的转换：当进行远程
+跨进程服务调用时，需要将被传输的Java对象编码成字节数组或者ByteBuffer对象；当远程服务读取字节数组或者ByteBuffer对象，需要将其还原成发送时的对象。
+这听起来十分熟悉，就跟数据库存取数据一般，需要保证取的结果跟存时的一样。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://waveszh.github.io/posts/netty-codec/" />
+<meta property="article:published_time" content="2019-03-31T21:56:38+08:00" />
+<meta property="article:modified_time" content="2019-03-31T21:56:38+08:00" />
+<title>Netty Codec | X-Y-Z</title>
+<link rel="icon" href="/favicon.png" type="image/x-icon">
+
+
+<link rel="stylesheet" href="/book.min.a5976c405dae433d8f29b44570050888016c89d73d4734909e982c645bbb4d05.css" integrity="sha256-pZdsQF2uQz2PKbRFcAUIiAFsidc9RzSQnpgsZFu7TQU=">
+
+
+<script defer src="/search.min.4b5374ff6744223ff0adad18171a251385303ccb9ef225664aea3b0e539578fd.js" integrity="sha256-S1N0/2dEIj/wra0YFxolE4UwPMue8iVmSuo7DlOVeP0="></script>
+
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+  
+</head>
+
+<body>
+  <input type="checkbox" class="hidden" id="menu-control" />
+  <main class="flex container">
+
+    <aside class="book-menu fixed">
+      <nav>
+<h2 class="book-brand">
+  <a href="https://waveszh.github.io/"><span>X-Y-Z</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" placeholder="Search" id="book-search-input" maxlength="64" />
+  <div class="book-search-spinner spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+    <ul>
+<li><a href="/posts/"><strong>Blog</strong></a></li>
+</ul>
+
+
+
+
+
+</nav>
+
+
+<script>
+(function() {
+  var menu = document.querySelector("aside.book-menu nav");
+  addEventListener("beforeunload", function(event) {
+    localStorage.setItem("menu.scrollTop", menu.scrollTop);
+  });
+  menu.scrollTop = localStorage.getItem("menu.scrollTop");
+})();
+</script>
+
+    </aside>
+
+    <div class="book-posts">
+      <header class="flex align-center justify-between book-header">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" alt="Menu" />
+  </label>
+  <strong>Netty Codec</strong>
+</header>
+
+      
+
+<header class="markdown">
+  <h1>Netty Codec</h1>
+  <h5>
+    <strong>Mar 31, 2019</strong>
+  </h5>
+</header>
+<article class="markdown"><p>Codec是编解码器，用于数据格式的转换。在网络通信中，底层都是通过字节流交互。故在Netty中需要实现应用程序的数据与字节流的转换：当进行远程
+跨进程服务调用时，需要将被传输的Java对象编码成字节数组或者ByteBuffer对象；当远程服务读取字节数组或者ByteBuffer对象，需要将其还原成发送时的对象。
+这听起来十分熟悉，就跟数据库存取数据一般，需要保证取的结果跟存时的一样。</p>
+
+<blockquote>
+<p>Netty version: 4.1</p>
+</blockquote>
+
+<h1 id="1-java序列化">1 Java序列化</h1>
+
+<p>通过上面的描述，感觉编解码跟Java序列化很相似。其实Java序列化也是编解码技术的一种实现。但是其有几个缺点：</p>
+
+<ol>
+<li>无法跨语言</li>
+<li>序列化后的码流大（空间）</li>
+<li>性能低（时间）</li>
+</ol>
+
+<p>但是Netty还是提供了Java序列化相应的Codec handler，可能因为方便使用吧。</p>
+
+<h1 id="2-tcp粘包-拆包">2 TCP粘包/拆包</h1>
+
+<p>TCP是一个面向字节流的协议，它是性质是流式的，所以它并没有分段，就像水流一样，你没法知道什么时候开始，什么时候结束。故有使用Netty进行TCP/IP网络通信会发生以下情况：</p>
+
+<p><img src="/images/tcp-packet.png" alt="" /></p>
+
+<blockquote>
+<p><a href="https://zhuanlan.zhihu.com/p/41709589">UDP不会发生粘包</a></p>
+</blockquote>
+
+<p>常见原因：</p>
+
+<ol>
+<li>要发送的数据大于TCP发送缓冲区剩余空间大小，将会发生拆包</li>
+<li>待发送数据大于MSS（最大报文长度），TCP在传输前将进行拆包</li>
+<li>要发送的数据小于TCP发送缓冲区的大小，TCP将多次写入缓冲区的数据一次发送出去，将会发生粘包</li>
+<li>接收数据端的应用层没有及时读取接收缓冲区中的数据，将发生粘包</li>
+</ol>
+
+<!-- 由此可见，发送方对此无感，接收方需对此对相应处理。 -->
+
+<h1 id="3-netty如何实现编解码">3 Netty如何实现编解码</h1>
+
+<p>通过Channel和Handler篇可知，编解码器通过Handler方式实现：</p>
+
+<ul>
+<li>【Unsafe.read】-&gt; Decoder handler 将ByteBuf解码为应用程序数据 -&gt; 其他handler对解码后的数据进行处理</li>
+<li>【Channel.write】-&gt; 其他handler处理 -&gt; Encoder handler 将对象编码为ByteBuf -&gt;【Unsafe.write】</li>
+</ul>
+
+<!--Netty中的Encoder是`MessageToByteEncoder`的子类，Decoder是`ByteToMessageDecoder`的子类。-->
+
+<p><code>MessageToByteEncoder</code>和<code>ByteToMessageDecoder</code>是ByteBuf和对象之间转换；<code>MessageToMessageEncoder</code>和<code>MessageToMessageDecoder</code>
+是对象之间的转换。</p>
+
+<h2 id="3-1-messagetobyteencoder">3.1 MessageToByteEncoder</h2>
+
+<p>可以猜想得到，对象肯定是通过<code>ChannelOutboundHandler.write(...)</code>方法的处理完成编码并将编码后的数据交给next handler</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> write(ChannelHandlerContext <span style="color:#a6e22e">ctx</span>, Object <span style="color:#a6e22e">msg</span>, ChannelPromise <span style="color:#a6e22e">promise</span>) <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    ByteBuf <span style="color:#a6e22e">buf</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#75715e">// 可以通过自定义matcher匹配需要处理的消息
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (acceptOutboundMessage(msg)) {
+            <span style="color:#a6e22e">@SuppressWarnings</span>(<span style="color:#e6db74">&#34;unchecked&#34;</span>)
+            I <span style="color:#a6e22e">cast</span> <span style="color:#f92672">=</span> (I) msg;
+            <span style="color:#75715e">// 分配buffer 用于存放编码后的数据。其使用的是初始化booststrap中设置的allocator:pool or unpool
+</span><span style="color:#75715e"></span>            buf <span style="color:#f92672">=</span> allocateBuffer(ctx, cast, preferDirect);
+            <span style="color:#66d9ef">try</span> {
+                <span style="color:#75715e">// 需要子类实现的方法。编码协议，粘包/拆包处理等
+</span><span style="color:#75715e"></span>                encode(ctx, cast, buf);
+            } <span style="color:#66d9ef">finally</span> {
+                <span style="color:#75715e">// 引用计数修改
+</span><span style="color:#75715e"></span>                ReferenceCountUtil.<span style="color:#a6e22e">release</span>(cast);
+            }
+
+            <span style="color:#66d9ef">if</span> (buf.<span style="color:#a6e22e">isReadable</span>()) {
+                <span style="color:#75715e">// 通知next handler。 tail-&gt;head，直到head触发Unsafe.write
+</span><span style="color:#75715e"></span>                ctx.<span style="color:#a6e22e">write</span>(buf, promise);
+            } <span style="color:#66d9ef">else</span> {
+                buf.<span style="color:#a6e22e">release</span>();
+                ctx.<span style="color:#a6e22e">write</span>(Unpooled.<span style="color:#a6e22e">EMPTY_BUFFER</span>, promise);
+            }
+            buf <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+        } <span style="color:#66d9ef">else</span> {
+            ctx.<span style="color:#a6e22e">write</span>(msg, promise);
+        }
+    } <span style="color:#66d9ef">catch</span> (EncoderException <span style="color:#a6e22e">e</span>) {
+        <span style="color:#66d9ef">throw</span> e;
+    } <span style="color:#66d9ef">catch</span> (Throwable <span style="color:#a6e22e">e</span>) {
+        <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> EncoderException(e);
+    } <span style="color:#66d9ef">finally</span> {
+        <span style="color:#66d9ef">if</span> (buf <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>) {
+            buf.<span style="color:#a6e22e">release</span>();
+        }
+    }
+}</code></pre></div>
+<h2 id="3-2-bytetomessagedecoder">3.2 ByteToMessageDecoder</h2>
+
+<p><code>ByteToMessageDecoder#channelRead(ChannelHandlerContext, Object)</code></p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java">ByteBuf <span style="color:#a6e22e">data</span> <span style="color:#f92672">=</span> (ByteBuf) msg;
+<span style="color:#75715e">// cumulation 为上一次decode的消息，当其为null代表上一次消息已经完全解码，反之代表需要上一次的消息未完全解码
+</span><span style="color:#75715e"></span>first <span style="color:#f92672">=</span> cumulation <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>;
+<span style="color:#66d9ef">if</span> (first) {
+    cumulation <span style="color:#f92672">=</span> data;
+} <span style="color:#66d9ef">else</span> {
+    <span style="color:#75715e">// 存在半包消息，ByteBuf累加
+</span><span style="color:#75715e"></span>    cumulation <span style="color:#f92672">=</span> cumulator.<span style="color:#a6e22e">cumulate</span>(ctx.<span style="color:#a6e22e">alloc</span>(), cumulation, data);
+}
+<span style="color:#75715e">// 重头
+</span><span style="color:#75715e"></span>callDecode(ctx, cumulation, out);</code></pre></div>
+<p><code>cumulation</code>是共享变量且没有同步操作，故decoder一定不可共享，否则会造成decode错误</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">void</span> callDecode(ChannelHandlerContext <span style="color:#a6e22e">ctx</span>, ByteBuf <span style="color:#a6e22e">in</span>, List<span style="color:#f92672">&lt;</span>Object<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">out</span>) {
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#66d9ef">while</span> (in.<span style="color:#a6e22e">isReadable</span>()) {
+            <span style="color:#75715e">// 已解码的消息数量
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">outSize</span> <span style="color:#f92672">=</span> out.<span style="color:#a6e22e">size</span>();
+
+            <span style="color:#66d9ef">if</span> (outSize <span style="color:#f92672">&gt;</span> 0) {
+                fireChannelRead(ctx, out, outSize);
+                out.<span style="color:#a6e22e">clear</span>();
+
+                <span style="color:#75715e">// Check if this handler was removed before continuing with decoding.
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">// If it was removed, it is not safe to continue to operate on the buffer.
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">// See:
+</span><span style="color:#75715e"></span>                <span style="color:#75715e">// - https://github.com/netty/netty/issues/4635
+</span><span style="color:#75715e"></span>                <span style="color:#66d9ef">if</span> (ctx.<span style="color:#a6e22e">isRemoved</span>()) {
+                    <span style="color:#66d9ef">break</span>;
+                }
+                outSize <span style="color:#f92672">=</span> 0;
+            }
+
+            <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">oldInputLength</span> <span style="color:#f92672">=</span> in.<span style="color:#a6e22e">readableBytes</span>();
+            <span style="color:#75715e">// decode message
+</span><span style="color:#75715e"></span>            decodeRemovalReentryProtection(ctx, in, out);
+
+            <span style="color:#75715e">// Check if this handler was removed before continuing the loop.
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// If it was removed, it is not safe to continue to operate on the buffer.
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">//
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// See https://github.com/netty/netty/issues/1664
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (ctx.<span style="color:#a6e22e">isRemoved</span>()) {
+                <span style="color:#66d9ef">break</span>;
+            }
+            <span style="color:#75715e">// out列表长度不变
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (outSize <span style="color:#f92672">==</span> out.<span style="color:#a6e22e">size</span>()) {
+                <span style="color:#75715e">// 未消费ByteBuf，为半包,
+</span><span style="color:#75715e"></span>                <span style="color:#66d9ef">if</span> (oldInputLength <span style="color:#f92672">==</span> in.<span style="color:#a6e22e">readableBytes</span>()) {
+                    <span style="color:#66d9ef">break</span>;
+                } <span style="color:#66d9ef">else</span> {
+                    <span style="color:#75715e">// 无效消息：太长或者其他原因，丢了不处理
+</span><span style="color:#75715e"></span>                    <span style="color:#66d9ef">continue</span>;
+                }
+            }
+            <span style="color:#75715e">// 奇怪的东西：未更新readIndex，却解码了message，不合规范
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (oldInputLength <span style="color:#f92672">==</span> in.<span style="color:#a6e22e">readableBytes</span>()) {
+                <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> DecoderException(
+                        StringUtil.<span style="color:#a6e22e">simpleClassName</span>(getClass()) <span style="color:#f92672">+</span>
+                                <span style="color:#e6db74">&#34;.decode() did not read anything but decoded a message.&#34;</span>);
+            }
+            <span style="color:#75715e">// 是否只解码一条消息
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (isSingleDecode()) {
+                <span style="color:#66d9ef">break</span>;
+            }
+        }
+    } <span style="color:#66d9ef">catch</span> (DecoderException <span style="color:#a6e22e">e</span>) {
+        <span style="color:#66d9ef">throw</span> e;
+    } <span style="color:#66d9ef">catch</span> (Exception <span style="color:#a6e22e">cause</span>) {
+        <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> DecoderException(cause);
+    }
+}</code></pre></div>
+<p>其子类通过继承这些类实现<code>encode</code>或者<code>decode</code>方法</p>
+
+<h1 id="4-netty中粘包-拆包的处理">4 Netty中粘包/拆包的处理</h1>
+
+<p><code>LengthFieldBasedFrameDecoder</code>为抽象类，<code>ObjectDecoder</code>是其子类，相应的编码其为<code>ObjectEncoder</code></p>
+
+<p><code>ObjectEncoder#encode(ChannelHandlerContext, Serializable, ByteBuf)</code></p>
+
+<p>由于其使用的Java自身的序列化技术，故消息必须实现<code>Serializable</code></p>
+
+<p>其主要工作就是为Java序列化消息以及为编码后的消息增加消息头表示消息的长度，以便<code>ObjectDecoder</code>利用消息长度来解码消息</p>
+
+<p><code>ObjectDecoder#decode(ChannelHandlerContext, ByteBuf)</code></p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">Object</span> decode(ChannelHandlerContext <span style="color:#a6e22e">ctx</span>, ByteBuf <span style="color:#a6e22e">in</span>) <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    <span style="color:#75715e">// 通过`LengthFieldBasedFrameDecoder#decode`获取实际的消息体
+</span><span style="color:#75715e"></span>    ByteBuf <span style="color:#a6e22e">frame</span> <span style="color:#f92672">=</span> (ByteBuf) <span style="color:#66d9ef">super</span>.<span style="color:#a6e22e">decode</span>(ctx, in);
+    <span style="color:#66d9ef">if</span> (frame <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
+        <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">null</span>;
+    }
+
+    ObjectInputStream <span style="color:#a6e22e">ois</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> CompactObjectInputStream(<span style="color:#66d9ef">new</span> ByteBufInputStream(frame, <span style="color:#66d9ef">true</span>), classResolver);
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#66d9ef">return</span> ois.<span style="color:#a6e22e">readObject</span>();
+    } <span style="color:#66d9ef">finally</span> {
+        ois.<span style="color:#a6e22e">close</span>();
+    }
+}</code></pre></div><div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">if</span> (discardingTooLongFrame) {
+    <span style="color:#75715e">// 消息过长，拆成多个packet过来。拆后的消息过长，丢弃
+</span><span style="color:#75715e"></span>    discardingTooLongFrame(in);
+}
+... ...
+<span style="color:#75715e">// 需要丢包
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">if</span> (frameLength <span style="color:#f92672">&gt;</span> maxFrameLength) {
+    exceededFrameLength(in, frameLength);
+    <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">null</span>;
+}</code></pre></div>
+<p>相互呼应。当帧消息长度超过<code>maxFrameLength</code>，需要丢弃该消息，如果<code>frameLength</code>大于此刻帧消息长度，那应该是发送方发送消息时发生了拆包，那么下一次
+收到的帧消息需要继续丢弃剩余长度。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">void</span> exceededFrameLength(ByteBuf <span style="color:#a6e22e">in</span>, <span style="color:#66d9ef">long</span> <span style="color:#a6e22e">frameLength</span>) {
+    <span style="color:#75715e">// 剩余需要丢弃的字节数。in.readableBytes()表示当前消息的消息长度
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">long</span> <span style="color:#a6e22e">discard</span> <span style="color:#f92672">=</span> frameLength <span style="color:#f92672">-</span> in.<span style="color:#a6e22e">readableBytes</span>();
+    tooLongFrameLength <span style="color:#f92672">=</span> frameLength;
+
+    <span style="color:#66d9ef">if</span> (discard <span style="color:#f92672">&lt;</span> 0) {
+        <span style="color:#75715e">// buffer contains more bytes then the frameLength so we can discard all now
+</span><span style="color:#75715e"></span>        in.<span style="color:#a6e22e">skipBytes</span>((<span style="color:#66d9ef">int</span>) frameLength);
+    } <span style="color:#66d9ef">else</span> {
+        <span style="color:#75715e">// Enter the discard mode and discard everything received so far.
+</span><span style="color:#75715e"></span>        discardingTooLongFrame <span style="color:#f92672">=</span> <span style="color:#66d9ef">true</span>;
+        <span style="color:#75715e">// 记下来 下一次继续丢
+</span><span style="color:#75715e"></span>        bytesToDiscard <span style="color:#f92672">=</span> discard;
+        in.<span style="color:#a6e22e">skipBytes</span>(in.<span style="color:#a6e22e">readableBytes</span>());
+    }
+    failIfNecessary(<span style="color:#66d9ef">true</span>);
+}</code></pre></div><div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#75715e">// 通过协议定义的length file的偏移量以及其长度获取帧消息长度。
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">long</span> <span style="color:#a6e22e">frameLength</span> <span style="color:#f92672">=</span> getUnadjustedFrameLength(in, actualLengthFieldOffset, lengthFieldLength, byteOrder);</code></pre></div><div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#75715e">// 获取
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">readerIndex</span> <span style="color:#f92672">=</span> in.<span style="color:#a6e22e">readerIndex</span>();
+<span style="color:#66d9ef">int</span> <span style="color:#a6e22e">actualFrameLength</span> <span style="color:#f92672">=</span> frameLengthInt <span style="color:#f92672">-</span> initialBytesToStrip;
+<span style="color:#75715e">// 提取需解析的消息。使用ByteBuf#retainedSlice，零拷贝
+</span><span style="color:#75715e"></span>ByteBuf <span style="color:#a6e22e">frame</span> <span style="color:#f92672">=</span> extractFrame(ctx, in, readerIndex, actualFrameLength);
+<span style="color:#75715e">// 由于ByteBuf#retainedSlice不改变read/write index，需手动指定read index
+</span><span style="color:#75715e"></span>in.<span style="color:#a6e22e">readerIndex</span>(readerIndex <span style="color:#f92672">+</span> actualFrameLength);</code></pre></div>
+<p>其他几个也都是利用encode时为消息增加的额外字段处理粘包/拆包的：</p>
+
+<ol>
+<li><code>DelimiterBasedFrameDecoder</code>是基于消息边界方式进行粘包拆包处理的</li>
+<li><code>FixedLengthFrameDecoder</code>是基于固定长度消息进行粘包拆包处理的</li>
+<li><code>LineBasedFrameDecoder</code>是基于行来进行消息粘包拆包处理的</li>
+</ol>
+
+<h1 id="link">link</h1>
+
+<ul>
+<li><a href="https://blog.csdn.net/fgx_123456/article/details/80031821">TCP粘包拆包的产生原因分析及解决思路</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/41709589">什么是TCP粘包、为什么UDP不会粘包</a></li>
+</ul></article>
+
+      
+
+      
+    </div>
+
+    
+  
+
+  <aside class="book-toc levels-3 fixed">
+    <nav id="TableOfContents">
+<ul>
+<li><a href="#1-java序列化">1 Java序列化</a></li>
+<li><a href="#2-tcp粘包-拆包">2 TCP粘包/拆包</a></li>
+<li><a href="#3-netty如何实现编解码">3 Netty如何实现编解码</a>
+<ul>
+<li><a href="#3-1-messagetobyteencoder">3.1 MessageToByteEncoder</a></li>
+<li><a href="#3-2-bytetomessagedecoder">3.2 ByteToMessageDecoder</a></li>
+</ul></li>
+<li><a href="#4-netty中粘包-拆包的处理">4 Netty中粘包/拆包的处理</a></li>
+<li><a href="#link">link</a></li>
+</ul>
+</nav>
+  </aside>
+
+
+
+  </main>
+
+  
+</body>
+
+</html>

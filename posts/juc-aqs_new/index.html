@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><meta property="og:title" content="深入理解JUC：AbstractQueuedSynchronizer" />
+<meta property="og:description" content="AbstractQueuedSynchronizer 简称AQS, 是 JUC 并发框架的基石，支撑着 Lock 和 同步器的实现。其本质通过名称也能得知一二， Queued，通过队列实现同步，尝试获取资源的线程将封装成节点在队列中以自旋的方式获取资源，实现线程同步。
+
+在 AQS 中存在两种队列，同步队列和条件(等待)队列。同步队列中的节点是尝试获取资源失败的线程构成的，而条件队列中的节点是由于某些条件而挂起的线程构成的，类似 Object.wait/notify，当条件激活时，条件队列中的节点转移到同步队列并唤醒。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://waveszh.github.io/posts/juc-aqs_new/" />
+<meta property="article:published_time" content="2019-03-02T14:50:36+08:00" />
+<meta property="article:modified_time" content="2019-03-02T14:50:36+08:00" />
+<title>深入理解JUC：AbstractQueuedSynchronizer | X-Y-Z</title>
+<link rel="icon" href="/favicon.png" type="image/x-icon">
+
+
+<link rel="stylesheet" href="/book.min.a5976c405dae433d8f29b44570050888016c89d73d4734909e982c645bbb4d05.css" integrity="sha256-pZdsQF2uQz2PKbRFcAUIiAFsidc9RzSQnpgsZFu7TQU=">
+
+
+<script defer src="/search.min.4b5374ff6744223ff0adad18171a251385303ccb9ef225664aea3b0e539578fd.js" integrity="sha256-S1N0/2dEIj/wra0YFxolE4UwPMue8iVmSuo7DlOVeP0="></script>
+
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+  
+</head>
+
+<body>
+  <input type="checkbox" class="hidden" id="menu-control" />
+  <main class="flex container">
+
+    <aside class="book-menu fixed">
+      <nav>
+<h2 class="book-brand">
+  <a href="https://waveszh.github.io/"><span>X-Y-Z</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" placeholder="Search" id="book-search-input" maxlength="64" />
+  <div class="book-search-spinner spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+    <ul>
+<li><a href="/posts/"><strong>Blog</strong></a></li>
+</ul>
+
+
+
+
+
+</nav>
+
+
+<script>
+(function() {
+  var menu = document.querySelector("aside.book-menu nav");
+  addEventListener("beforeunload", function(event) {
+    localStorage.setItem("menu.scrollTop", menu.scrollTop);
+  });
+  menu.scrollTop = localStorage.getItem("menu.scrollTop");
+})();
+</script>
+
+    </aside>
+
+    <div class="book-posts">
+      <header class="flex align-center justify-between book-header">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" alt="Menu" />
+  </label>
+  <strong>深入理解JUC：AbstractQueuedSynchronizer</strong>
+</header>
+
+      
+
+<header class="markdown">
+  <h1>深入理解JUC：AbstractQueuedSynchronizer</h1>
+  <h5>
+    <strong>Mar 2, 2019</strong>
+  </h5>
+</header>
+<article class="markdown"><p><code>AbstractQueuedSynchronizer</code> 简称AQS, 是 JUC 并发框架的基石，支撑着 Lock 和 同步器的实现。其本质通过名称也能得知一二， <strong>Queued</strong>，通过队列实现同步，尝试获取资源的线程将封装成节点在队列中以自旋的方式获取资源，实现线程同步。</p>
+
+<p>在 AQS 中存在两种队列，同步队列和条件(等待)队列。同步队列中的节点是尝试获取资源失败的线程构成的，而条件队列中的节点是由于某些条件而挂起的线程构成的，类似 Object.wait/notify，当条件激活时，条件队列中的节点转移到同步队列并唤醒。</p>
+
+<h2 id="1-同步队列">1. 同步队列</h2>
+
+<p>当线程获取资源失败后会放入同步队列中挂起，等待下一次唤醒后尝试获取。其中节点有以下属性：</p>
+
+<table>
+<thead>
+<tr>
+<th align="left">属性名称</th>
+<th align="center">属性描述</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td align="left">int waitStatus</td>
+<td align="center">节点状态</td>
+</tr>
+
+<tr>
+<td align="left">Node prev</td>
+<td align="center">前驱节点</td>
+</tr>
+
+<tr>
+<td align="left">Node next</td>
+<td align="center">后继节点</td>
+</tr>
+
+<tr>
+<td align="left">Node nextWaiter</td>
+<td align="center">condition队列中后继节点</td>
+</tr>
+
+<tr>
+<td align="left">Thread thread</td>
+<td align="center">入队列时的当前线程</td>
+</tr>
+</tbody>
+</table>
+
+<p>其中 <code>waitStatus</code> 有多个状态，非负数的状态意味着该节点不需要唤醒。</p>
+
+<ol>
+<li>CANCELLED（1）：节点由于获取超时或者被中断以至从同步队列中被取消。被取消的节点状态不会再改变。如果为取消状态，则不会被唤醒去尝试获取锁<br /></li>
+<li>SIGNAL（-1）：如果节点状态为SIGNAL，则在其 release 或者 cancel 时需要unpark唤醒其后继节点。为了防止并发 release 或者 cancel 导致重复 unpark</li>
+<li>CONDITION（-2）：当前节点目前处于 condition 队列中，结点的线程等待在 ConditionObject 上，当其他线程调用了 Condition的signal() 方法后，CONDITION 状态的结点将从等待队列转移到同步队列中，等待获取同步锁<br /></li>
+<li>PROPAGATE（-3）：与共享模式相关，在共享模式中，该状态标识结点的线程处于可运行状态<br /></li>
+<li>NONE（0）：初始状态<br /></li>
+</ol>
+
+<p>head 节点代表着正占用资源的线程，next 节点代表着等待获取资源的线程，按照 FIFO 的原则唤醒非取消状态的下一个节点尝试去获取资源。</p>
+
+<h2 id="2-条件队列">2. 条件队列</h2>
+
+<p>条件队列是单向队列，结构在 <code>ConditionObject</code> 中有定义：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#75715e">//  head 节点
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">transient</span> Node <span style="color:#a6e22e">firstWaiter</span>;
+<span style="color:#75715e">// tail 节点
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">transient</span> Node <span style="color:#a6e22e">lastWaiter</span>;</code></pre></div>
+<p><code>ConditionObject</code> 类实现了 <code>Condition</code> 接口，该接口定义了与 Lock 锁相关的线程通信方法，主要分为 <strong>await</strong> 和 <strong>signal</strong> 两大类。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">final</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">await</span>() <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">InterruptedException</span> {
+    <span style="color:#75715e">// 线程是否已被中断
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (Thread.<span style="color:#a6e22e">interrupted</span>())
+        <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> InterruptedException();
+    <span style="color:#75715e">// 向条件队列尾部增加节点
+</span><span style="color:#75715e"></span>    Node <span style="color:#a6e22e">node</span> <span style="color:#f92672">=</span> addConditionWaiter();
+    <span style="color:#75715e">// 释放资源占用
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">savedState</span> <span style="color:#f92672">=</span> fullyRelease(node);
+    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">interruptMode</span> <span style="color:#f92672">=</span> 0;
+    <span style="color:#75715e">// 检查是否在同步队列中
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">while</span> (<span style="color:#f92672">!</span>isOnSyncQueue(node)) {
+        <span style="color:#75715e">// 线程挂起
+</span><span style="color:#75715e"></span>        LockSupport.<span style="color:#a6e22e">park</span>(<span style="color:#66d9ef">this</span>);
+        <span style="color:#75715e">// 1. 如果由于中断而唤醒， 
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> ((interruptMode <span style="color:#f92672">=</span> checkInterruptWhileWaiting(node)) <span style="color:#f92672">!=</span> 0)
+            <span style="color:#66d9ef">break</span>;
+    }
+    <span style="color:#75715e">// 阻塞获取资源
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (acquireQueued(node, savedState) <span style="color:#f92672">&amp;&amp;</span> interruptMode <span style="color:#f92672">!=</span> THROW_IE)
+        interruptMode <span style="color:#f92672">=</span> REINTERRUPT;
+    <span style="color:#66d9ef">if</span> (node.<span style="color:#a6e22e">nextWaiter</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>) 
+        <span style="color:#75715e">// 清除取消的节点
+</span><span style="color:#75715e"></span>        unlinkCancelledWaiters();
+    <span style="color:#66d9ef">if</span> (interruptMode <span style="color:#f92672">!=</span> 0)
+        reportInterruptAfterWait(interruptMode);
+}</code></pre></div></article>
+
+      
+
+      
+    </div>
+
+    
+  
+
+  <aside class="book-toc levels-3 fixed">
+    <nav id="TableOfContents">
+<ul>
+<li>
+<ul>
+<li><a href="#1-同步队列">1. 同步队列</a></li>
+<li><a href="#2-条件队列">2. 条件队列</a></li>
+</ul></li>
+</ul>
+</nav>
+  </aside>
+
+
+
+  </main>
+
+  
+</body>
+
+</html>

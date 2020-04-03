@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><meta property="og:title" content="Netty Handler" />
+<meta property="og:description" content="Web服务器通常都会使用filter来处理请求，这样就将处理流程分离和解耦。在Netty中也一样，其拥有ChannelPipeline作为过滤器通道，消息在里面流动和传递，由其中的
+Handler拦截处理。Handler之间又由Context（上下文）作为纽扣连接起来。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://waveszh.github.io/posts/netty-handler/" />
+<meta property="article:published_time" content="2019-03-24T22:17:09+08:00" />
+<meta property="article:modified_time" content="2019-03-24T22:17:09+08:00" />
+<title>Netty Handler | X-Y-Z</title>
+<link rel="icon" href="/favicon.png" type="image/x-icon">
+
+
+<link rel="stylesheet" href="/book.min.a5976c405dae433d8f29b44570050888016c89d73d4734909e982c645bbb4d05.css" integrity="sha256-pZdsQF2uQz2PKbRFcAUIiAFsidc9RzSQnpgsZFu7TQU=">
+
+
+<script defer src="/search.min.4b5374ff6744223ff0adad18171a251385303ccb9ef225664aea3b0e539578fd.js" integrity="sha256-S1N0/2dEIj/wra0YFxolE4UwPMue8iVmSuo7DlOVeP0="></script>
+
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+  
+</head>
+
+<body>
+  <input type="checkbox" class="hidden" id="menu-control" />
+  <main class="flex container">
+
+    <aside class="book-menu fixed">
+      <nav>
+<h2 class="book-brand">
+  <a href="https://waveszh.github.io/"><span>X-Y-Z</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" placeholder="Search" id="book-search-input" maxlength="64" />
+  <div class="book-search-spinner spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+    <ul>
+<li><a href="/posts/"><strong>Blog</strong></a></li>
+</ul>
+
+
+
+
+
+</nav>
+
+
+<script>
+(function() {
+  var menu = document.querySelector("aside.book-menu nav");
+  addEventListener("beforeunload", function(event) {
+    localStorage.setItem("menu.scrollTop", menu.scrollTop);
+  });
+  menu.scrollTop = localStorage.getItem("menu.scrollTop");
+})();
+</script>
+
+    </aside>
+
+    <div class="book-posts">
+      <header class="flex align-center justify-between book-header">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" alt="Menu" />
+  </label>
+  <strong>Netty Handler</strong>
+</header>
+
+      
+
+<header class="markdown">
+  <h1>Netty Handler</h1>
+  <h5>
+    <strong>Mar 24, 2019</strong>
+  </h5>
+</header>
+<article class="markdown"><p>Web服务器通常都会使用filter来处理请求，这样就将处理流程分离和解耦。在Netty中也一样，其拥有<code>ChannelPipeline</code>作为过滤器通道，消息在里面流动和传递，由其中的
+<code>Handler</code>拦截处理。<code>Handler</code>之间又由<code>Context（上下文）</code>作为纽扣连接起来。</p>
+
+<blockquote>
+<p>Netty version: 4.1</p>
+</blockquote>
+
+<h2 id="1-pipeline事件传播机制">1 pipeline事件传播机制</h2>
+
+<p>从源码上扣下来的：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"> <span style="color:#f92672">*</span>                                                 I<span style="color:#f92672">/</span>O <span style="color:#a6e22e">Request</span>
+ <span style="color:#f92672">*</span>                                            via {<span style="color:#a6e22e">@link</span> Channel} or
+ <span style="color:#f92672">*</span>                                        {<span style="color:#a6e22e">@link</span> ChannelHandlerContext}
+ <span style="color:#f92672">*</span>                                                      <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">+---------------------------------------------------+---------------+</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>                           ChannelPipeline         <span style="color:#f92672">|</span>               <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>                                                  <span style="color:#960050;background-color:#1e0010">\</span><span style="color:#f92672">|/</span>              <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">+---------------------+</span>            <span style="color:#f92672">+-----------+----------+</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">|</span> Inbound <span style="color:#a6e22e">Handler</span>  N  <span style="color:#f92672">|</span>            <span style="color:#f92672">|</span> Outbound <span style="color:#a6e22e">Handler</span>  1  <span style="color:#f92672">|</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">+----------+----------+</span>            <span style="color:#f92672">+-----------+----------+</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>              <span style="color:#f92672">/|</span><span style="color:#960050;background-color:#1e0010">\</span>                                  <span style="color:#f92672">|</span>               <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>               <span style="color:#f92672">|</span>                                  <span style="color:#960050;background-color:#1e0010">\</span><span style="color:#f92672">|/</span>              <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">+----------+----------+</span>            <span style="color:#f92672">+-----------+----------+</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">|</span> Inbound <span style="color:#a6e22e">Handler</span> N<span style="color:#f92672">-</span>1 <span style="color:#f92672">|</span>            <span style="color:#f92672">|</span> Outbound <span style="color:#a6e22e">Handler</span>  2  <span style="color:#f92672">|</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">+----------+----------+</span>            <span style="color:#f92672">+-----------+----------+</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>              <span style="color:#f92672">/|</span><span style="color:#960050;background-color:#1e0010">\</span>                                  .               <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>               .                                   .               <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span> ChannelHandlerContext.<span style="color:#a6e22e">fireIN_EVT</span>() ChannelHandlerContext.<span style="color:#a6e22e">OUT_EVT</span>()<span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>        [ method <span style="color:#a6e22e">call</span>]                       [method <span style="color:#a6e22e">call</span>]         <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>               .                                   .               <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>               .                                  <span style="color:#960050;background-color:#1e0010">\</span><span style="color:#f92672">|/</span>              <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">+----------+----------+</span>            <span style="color:#f92672">+-----------+----------+</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">|</span> Inbound <span style="color:#a6e22e">Handler</span>  2  <span style="color:#f92672">|</span>            <span style="color:#f92672">|</span> Outbound <span style="color:#a6e22e">Handler</span> M<span style="color:#f92672">-</span>1 <span style="color:#f92672">|</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">+----------+----------+</span>            <span style="color:#f92672">+-----------+----------+</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>              <span style="color:#f92672">/|</span><span style="color:#960050;background-color:#1e0010">\</span>                                  <span style="color:#f92672">|</span>               <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>               <span style="color:#f92672">|</span>                                  <span style="color:#960050;background-color:#1e0010">\</span><span style="color:#f92672">|/</span>              <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">+----------+----------+</span>            <span style="color:#f92672">+-----------+----------+</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">|</span> Inbound <span style="color:#a6e22e">Handler</span>  1  <span style="color:#f92672">|</span>            <span style="color:#f92672">|</span> Outbound <span style="color:#a6e22e">Handler</span>  M  <span style="color:#f92672">|</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>    <span style="color:#f92672">+----------+----------+</span>            <span style="color:#f92672">+-----------+----------+</span>    <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>              <span style="color:#f92672">/|</span><span style="color:#960050;background-color:#1e0010">\</span>                                  <span style="color:#f92672">|</span>               <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">+---------------+-----------------------------------+---------------+</span>
+ <span style="color:#f92672">*</span>                  <span style="color:#f92672">|</span>                                  <span style="color:#960050;background-color:#1e0010">\</span><span style="color:#f92672">|/</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">+---------------+-----------------------------------+---------------+</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>               <span style="color:#f92672">|</span>                                   <span style="color:#f92672">|</span>               <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>       [ Socket.<span style="color:#a6e22e">read</span>() ]                    [ Socket.<span style="color:#a6e22e">write</span>() ]     <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>                                                                   <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">|</span>  Netty <span style="color:#a6e22e">Internal</span> I<span style="color:#f92672">/</span>O <span style="color:#a6e22e">Threads</span> (Transport <span style="color:#a6e22e">Implementation</span>)            <span style="color:#f92672">|</span>
+ <span style="color:#f92672">*</span>  <span style="color:#f92672">+-------------------------------------------------------------------+</span></code></pre></div>
+<p>可以发现：</p>
+
+<ol>
+<li>ChannelPipeline中的handler需要处理inbound和outbound两类事件。</li>
+<li>inbound事件通常由I/O线程触发，如tcp链路建立事件，读事件等；outbound一般由用户主动发起的网络I/O请求，如用户发起连接，消息发送等操作。</li>
+<li>inbound事件inbound事件由下至上处理由下至上处理：由底层触发生成inbound事件；outbound事件由上至下：收到用户操作生成的outbound事件。</li>
+<li>事件通过ChannelHandlerContext在handler之间传递。</li>
+</ol>
+
+<p>由Java Doc可知其一些特性：</p>
+
+<ol>
+<li><code>ChannelPipeline</code>是<strong>thread-safe</strong>。pipeline在channel创建的时候生成并与channel绑定，每个channel都拥有自己的pipeline。注意：其中的<code>ChannelHandler</code>需要用户自行维护其线程安全。</li>
+<li><code>ChannelPipeline</code>可以动态添加或删除ChannelHander。比如当需要处理敏感信息时，添加加密Handler，处理完后再删除。</li>
+<li>通常<code>ChannelHandler</code>都是由I/O线程处理，但是如果对于耗时操作可以通过额外的<code>EventExecutorGroup</code>来处理。</li>
+</ol>
+
+<h2 id="2-pipeline初始化">2 pipeline初始化</h2>
+
+<p>以<code>DefaultChannelPipeline</code>为例</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">DefaultChannelPipeline</span>(Channel <span style="color:#a6e22e">channel</span>) {
+    <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">channel</span> <span style="color:#f92672">=</span> ObjectUtil.<span style="color:#a6e22e">checkNotNull</span>(channel, <span style="color:#e6db74">&#34;channel&#34;</span>);
+    succeededFuture <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> SucceededChannelFuture(channel, <span style="color:#66d9ef">null</span>);
+    voidPromise <span style="color:#f92672">=</span>  <span style="color:#66d9ef">new</span> VoidChannelPromise(channel, <span style="color:#66d9ef">true</span>);
+    
+    tail <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> TailContext(<span style="color:#66d9ef">this</span>);
+    head <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> HeadContext(<span style="color:#66d9ef">this</span>);
+
+    head.<span style="color:#a6e22e">next</span> <span style="color:#f92672">=</span> tail;
+    tail.<span style="color:#a6e22e">prev</span> <span style="color:#f92672">=</span> head;
+}</code></pre></div>
+<p>Pipeline一般在Channel创建时生成。</p>
+
+<p>其中涉及了两个重要的角色：<strong><code>TailContext</code></strong>和<strong><code>HeadContext</code></strong>。它们构成了一条链表的首尾。</p>
+
+<h2 id="3-pipeline添加handler">3 pipeline添加handler</h2>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">final</span> ChannelPipeline <span style="color:#a6e22e">addLast</span>(EventExecutorGroup <span style="color:#a6e22e">group</span>, String <span style="color:#a6e22e">name</span>, ChannelHandler <span style="color:#a6e22e">handler</span>) {
+    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">AbstractChannelHandlerContext</span> newCtx;
+    <span style="color:#66d9ef">synchronized</span> (<span style="color:#66d9ef">this</span>) {
+        <span style="color:#75715e">// 检测channel的重复性： 当handler为sharable，允许被其他channel使用。
+</span><span style="color:#75715e"></span>        checkMultiplicity(handler);
+        <span style="color:#75715e">// 创建与handler相关的context。通过context实现消息在handlers之间流转
+</span><span style="color:#75715e"></span>        newCtx <span style="color:#f92672">=</span> newContext(group, filterName(name, handler), handler);
+        <span style="color:#75715e">// 添加到处理链。addLast，不是让其成为tail，而是tail的pre节点。
+</span><span style="color:#75715e"></span>        addLast0(newCtx);
+
+        <span style="color:#75715e">// If the registered is false it means that the channel was not registered on an eventLoop yet.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// In this case we add the context to the pipeline and add a task that will call
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// ChannelHandler.handlerAdded(...) once the channel is registered.
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// 需要在channel注册成功后，触发handlerAdded事件。
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>registered) {
+            <span style="color:#75715e">// 如果未注册成功，标记context尚未/即将调用handlerAdded方法。
+</span><span style="color:#75715e"></span>            newCtx.<span style="color:#a6e22e">setAddPending</span>();
+            <span style="color:#75715e">// 添加待执行任务。等到合适的时候再触发
+</span><span style="color:#75715e"></span>            callHandlerCallbackLater(newCtx, <span style="color:#66d9ef">true</span>);
+            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">this</span>;
+        }
+        <span style="color:#75715e">// 如果未设置额外的EventExecutorGroup，则使用reactor线程，即NioEventLoop，否则使用设置的EventExecutorGroup中的线程
+</span><span style="color:#75715e"></span>        <span style="color:#75715e">// 这样做的好处：事件处理都由统一的线程完成，避免并发问题
+</span><span style="color:#75715e"></span>        EventExecutor <span style="color:#a6e22e">executor</span> <span style="color:#f92672">=</span> newCtx.<span style="color:#a6e22e">executor</span>();
+        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>executor.<span style="color:#a6e22e">inEventLoop</span>()) {
+            callHandlerAddedInEventLoop(newCtx, executor);
+            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">this</span>;
+        }
+    }
+    callHandlerAdded0(newCtx);
+    <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">this</span>;
+}</code></pre></div>
+<p>pipeline有很多操作handler的方法，方法内容大同小异：</p>
+
+<ol>
+<li>synchronized内置锁来一波，防止出现并发问题。因为channel可能会被用户线程并发使用(push)</li>
+<li>add/remove，context链调整</li>
+<li>当channeladd/remove成功后触发Handler add/remove事件</li>
+</ol>
+
+<p>其中添加task至<code>pendingHandlerCallbackHead</code>为了延迟调用直到channel注册成功，为什么呢？</p>
+
+<p>看看这个task做了什么，以<code>PendingHandlerAddedTask</code>为例：</p>
+
+<blockquote>
+<p>DefaultChannelPipeline.callHandlerAdded0(&hellip;)-&gt;AbstractChannelHandlerContext.callHandlerAdded()</p>
+</blockquote>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">final</span> <span style="color:#a6e22e">void</span> callHandlerAdded() <span style="color:#66d9ef">throws</span> <span style="color:#a6e22e">Exception</span> {
+    <span style="color:#75715e">// We must call setAddComplete before calling handlerAdded. Otherwise if the handlerAdded method generates
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// any pipeline events ctx.handler() will miss them because the state will not allow it.
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// ，不然如果handerAdded方法中触发i/o事件如read/write等，当前context会因为
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// 状态不允许&lt;code&gt;invokeHandler()&lt;code&gt;，无法处理此时产生的事件
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (setAddComplete()) {
+        handler().<span style="color:#a6e22e">handlerAdded</span>(<span style="color:#66d9ef">this</span>);
+    }
+}</code></pre></div>
+<p>如注释描述：必须要在调用<code>handlerAdded</code>方法前调用<code>setAddComplete</code>完成状态设置。否则此时调用后，<code>Handler#handlerAdded</code>方法里生成了事件，此handler因为状态不正确无法处理，导致事件丢失。</p>
+
+<p>因为Pipeline是将事件交由Context处理，基本类似以下伪代码：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">void</span> dealEvent(Object <span style="color:#a6e22e">event</span>) {
+    <span style="color:#66d9ef">if</span> (invokeHandler()) {
+        当前context处理event并传递
+    } <span style="color:#66d9ef">else</span> {
+        跳过当前context并传递
+    }
+}</code></pre></div>
+<p>其中<code>invokeHandler()</code>方法，判断当前是否可以调用handler处理event</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">boolean</span> invokeHandler() {
+    <span style="color:#75715e">// Store in local variable to reduce volatile reads.
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">handlerState</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">handlerState</span>;
+    <span style="color:#75715e">//  If not return {@code false} and if called or could not detect return {@code true}.
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">return</span> handlerState <span style="color:#f92672">==</span> ADD_COMPLETE <span style="color:#f92672">||</span> (<span style="color:#f92672">!</span>ordered <span style="color:#f92672">&amp;&amp;</span> handlerState <span style="color:#f92672">==</span> ADD_PENDING);
+}</code></pre></div>
+<p>看其中的判定条件<code>handlerState == ADD_COMPLETE</code>，通过<code>setAddComplete</code>可以达到条件。一言蔽之，需要channel注册后才能处理事件，否则跳过。</p>
+
+<p><code>!ordered &amp;&amp; handlerState == ADD_PENDING</code>是指Handler拥有的EventExecutor不是有序执行task且<code>ADD_PENDIN</code>。这种情况一般是针对于非NIO的情况</p>
+
+<p>但是在NIO情况下，如果为handler设置的额外EventExecutor不是task执行不是有序的，可能还是有问题？</p>
+
+<!--为什么要要register成功后触发handlerAdded？不然可能发生，eventLoop还未启动-->
+
+<h2 id="4-pipeline-api">4 pipeline api</h2>
+
+<p>pipeline是事件传播的入口。</p>
+
+<p><code>public interface ChannelPipeline extends ChannelInboundInvoker, ChannelOutboundInvoker, Iterable&lt;Entry&lt;String, ChannelHandler&gt;&gt;</code></p>
+
+<p>有两类事件传播的方法</p>
+
+<ul>
+<li><p>inbound事件传播方法：<code>fireChannelRead</code> <code>fireChannelReadComplete</code> <code>fireChannelActive</code>等fireXX，处理由I/O线程触发的事件，用于将inbound event交给head</p></li>
+
+<li><p>outbound事件传播方法：<code>bind</code> <code>connect</code> <code>read</code> <code>write</code>等网络I/O操作，处理由系统外部I/O操作触发的请求，用于将outbound event交给tail</p></li>
+</ul>
+
+<p>以<code>DefaultChannelPipeline.fireChannelRegistered()</code>为例介绍inbound事件传播流程</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#75715e">// DefaultChannelPipeline
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">final</span> ChannelPipeline <span style="color:#a6e22e">fireChannelRegistered</span>() {
+    <span style="color:#75715e">//	inbound事件传播的入口，head(HeadContext)-&gt;tail(TailContext)
+</span><span style="color:#75715e"></span>    AbstractChannelHandlerContext.<span style="color:#a6e22e">invokeChannelRegistered</span>(head);
+    <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">this</span>;
+}</code></pre></div>
+<p><code>fireChannelRegistered()</code>方法将ChannelRegistered事件交给head，开始传播</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#75715e">// AbstractChannelHandlerContext
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">static</span> <span style="color:#a6e22e">void</span> invokeChannelRegistered(<span style="color:#66d9ef">final</span> <span style="color:#a6e22e">AbstractChannelHandlerContext</span> next) {
+    <span style="color:#75715e">// 获取执行handler的EventExecutor.当没额外设置则使用Channel所绑定的EventExecutor
+</span><span style="color:#75715e"></span>    EventExecutor <span style="color:#a6e22e">executor</span> <span style="color:#f92672">=</span> next.<span style="color:#a6e22e">executor</span>();
+    <span style="color:#75715e">// 当前线程是否属于EventExecutor的线程
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// task由统一的EventExecutor执行，避免并发问题
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (executor.<span style="color:#a6e22e">inEventLoop</span>()) {
+        next.<span style="color:#a6e22e">invokeChannelRegistered</span>();
+    } <span style="color:#66d9ef">else</span> {
+        <span style="color:#75715e">// 提交任务
+</span><span style="color:#75715e"></span>        executor.<span style="color:#a6e22e">execute</span>(<span style="color:#66d9ef">new</span> Runnable() {
+            <span style="color:#a6e22e">@Override</span>
+            <span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> run() {
+                next.<span style="color:#a6e22e">invokeChannelRegistered</span>();
+            }
+        });
+    }
+}
+
+<span style="color:#66d9ef">private</span> <span style="color:#a6e22e">void</span> invokeChannelRegistered() {
+    <span style="color:#75715e">// 判断当前context是否可以处理事件
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (invokeHandler()) {
+        <span style="color:#66d9ef">try</span> {
+            <span style="color:#75715e">// 由HeadContext-&gt;TailContext 。在`Handler#channelRegistered`方法中完成自定义处理后，又调用`fireChannelRegistered`方法传播给下一个context
+</span><span style="color:#75715e"></span>            ((ChannelInboundHandler) handler()).<span style="color:#a6e22e">channelRegistered</span>(<span style="color:#66d9ef">this</span>);
+        } <span style="color:#66d9ef">catch</span> (Throwable <span style="color:#a6e22e">t</span>) {
+            notifyHandlerException(t);
+        }
+    } <span style="color:#66d9ef">else</span> {
+        <span style="color:#75715e">// 否则跳过，找下一个可用context
+</span><span style="color:#75715e"></span>        fireChannelRegistered();
+    }
+}
+
+<span style="color:#66d9ef">public</span> <span style="color:#a6e22e">ChannelHandlerContext</span> fireChannelRegistered() {
+    invokeChannelRegistered(findContextInbound());
+    <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">this</span>;
+}</code></pre></div>
+<p>再看看其他处理inbound事件的方法，大同小异：</p>
+
+<ol>
+<li>Pipeline调用fireXX方法将inbound事件传给<code>HeadContext</code>进行传播</li>
+<li>获取当前context所绑定的<code>EventExecutor</code>，由统一的线程处理事件</li>
+<li>处理完后寻找下一个为inbound的context</li>
+<li>继续2～3操作，直到tail(<code>TailContext</code>)</li>
+</ol>
+
+<p>outbound事件传播跟inbound十分类似：</p>
+
+<ol>
+<li>Pipeline调用fireXX方法将inbound事件传给<code>HeadContext</code>进行传播</li>
+<li>获取当前context所绑定的<code>EventExecutor</code>，由统一的线程处理事件</li>
+<li>处理完后寻找下一个为inbound的context</li>
+<li>继续2～3操作，直到tail(<code>TailContext</code>)</li>
+</ol>
+
+<h2 id="5-tailcontext-和-headcontext">5 TailContext 和 HeadContext</h2>
+
+<p><code>final class TailContext extends AbstractChannelHandlerContext implements ChannelInboundHandler</code></p>
+
+<p><code>final class HeadContext extends AbstractChannelHandlerContext implements ChannelOutboundHandler, ChannelInboundHandler</code></p>
+
+<p>类关系如上，<code>TailContext</code>和<code>HeadContext</code>既是一个context，也是一个handler。它们组成的双向链表如下：</p>
+
+<p><img src="/images/netty-pipeline-dataflow.png" alt="" /></p>
+
+<p>解释下该图：</p>
+
+<ol>
+<li>inbound事件从HeadContext开始，寻找链表中inbound context直至TailContext</li>
+<li>outbound事件从TailContext开始，寻找链表中的oubound context直至HeadContext</li>
+</ol>
+
+<p>初始化如下：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java">HeadContext(DefaultChannelPipeline <span style="color:#a6e22e">pipeline</span>) {
+    <span style="color:#75715e">// 默认没有childExecutor
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">super</span>(pipeline, <span style="color:#66d9ef">null</span>, HEAD_NAME, <span style="color:#66d9ef">true</span>, <span style="color:#66d9ef">true</span>);
+    <span style="color:#75715e">// i/o操作的执行入口
+</span><span style="color:#75715e"></span>    unsafe <span style="color:#f92672">=</span> pipeline.<span style="color:#a6e22e">channel</span>().<span style="color:#a6e22e">unsafe</span>();
+    <span style="color:#75715e">// 设置handlerState状态为complete
+</span><span style="color:#75715e"></span>    setAddComplete();
+}
+
+TailContext(DefaultChannelPipeline <span style="color:#a6e22e">pipeline</span>) {
+    <span style="color:#66d9ef">super</span>(pipeline, <span style="color:#66d9ef">null</span>, TAIL_NAME, <span style="color:#66d9ef">true</span>, <span style="color:#66d9ef">false</span>);
+    setAddComplete();
+}</code></pre></div>
+<p><code>HeadContext</code>既是<code>InBoundHandler</code>和<code>OutBoundHandler</code> ；<code>TailContext</code>仅为<code>InBoundHandler</code>。<code>InBoundHandler</code>专处理inbound event; <code>OutBoundHandler</code>专处理outbound event</p>
+
+<p><code>HeadContext</code>的网络I/O方法都是使用Unsafe来实现的。其接近底层</p>
+
+<p><code>TailContext</code>的Fire Event方法基本上没有什么操作，只是收尾：回收消息等</p>
+
+<h2 id="6-serverbootstrapacceptor">6 ServerBootstrapAcceptor</h2>
+
+<p>server channel通过它将client channel分配给works(child evenLoopGroup)，自行追踪源码：</p>
+
+<blockquote>
+<p>NioEventLoop.run()-&gt;NioMessageUnsafe.read()-&gt;DefaultChannelPipeline.fireChannelRead(Object)-&gt;HeadContext.channelRead(&hellip;)-&gt;&hellip;-&gt;
+ServerBootstrapAcceptor.channelRead(&hellip;)-&gt;TailContext.channelRead(&hellip;)</p>
+</blockquote>
+
+<h2 id="7-encoder和decoder">7 Encoder和Decoder</h2>
+
+<p>网络中都是通过字节码的形式来传输数据的。在JAVA程序中，客户端发送Request需要将其转换成字节码传输，服务端接收Request将这些字节码还原成对象。其中
+对象转换成字节码的过程称为编码（Encode），字节码还原成对象的过程称为解码（Decode）。</p>
+
+<p>Netty是一个网络I/O框架，那肯定也包含了编解的操作，这些操作包装为handler。有以下类型：</p>
+
+<table>
+<thead>
+<tr>
+<th align="left">Type</th>
+<th align="left">Function</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td align="left"><code>ByteToMessageDecoder</code></td>
+<td align="left">将ByteBuf解码成POJO</td>
+</tr>
+
+<tr>
+<td align="left"><code>MessageToMessageDecoder</code></td>
+<td align="left">将POJO解码成POJO</td>
+</tr>
+
+<tr>
+<td align="left"><code>MessageToByteEncoder</code></td>
+<td align="left">将POJO编码成ByteBuf</td>
+</tr>
+
+<tr>
+<td align="left"><code>MessageToMessageEncoder</code></td>
+<td align="left">将POJO编码成POJO</td>
+</tr>
+
+<tr>
+<td align="left"><code>LengthFieldBasedFrameDecoder</code></td>
+<td align="left">半包解码器</td>
+</tr>
+
+<tr>
+<td align="left"><code>LengthFieldPrepender</code></td>
+<td align="left">半包编码器</td>
+</tr>
+</tbody>
+</table>
+
+<p>Encoder为outbound方法write传播。一般紧随head节点之后，将转换的信息传给head，让其通过Unsafe中的write方法将信息发送出去<br />
+Decoder为inbound方法fireChannelRead触发。一般紧随head节点之后，将NioUnsafe.read读取的信息转换并传递下去</p>
+
+<!--
+以常用的 `ObjectDecoder`为例
+
+Netty中的Decoder都需是`ByteToMessageDecoder`的子类 
+
+```java
+
+```
+-->
+
+<!--HeadContext=>Decoder=>Encoder=>TailContext-->
+
+<p>后续详解：粘包和拆包，高效的序列化协议（Protobuf，Thrift等）</p>
+
+<h2 id="8-小结">8 小结</h2>
+
+<ul>
+<li>Channel为数据传输的通道，Pipeline为Channel次级处理通道，其中的handlers是事件处理单元</li>
+<li>在Pipeline中存在两种消息：inbound和outbound。inbound事件一般指某，outbound事件一般指网络I/O操作。</li>
+<li>Pipeline中有一条context链，将多个Handler关联起来，形成了一个事件传播链。其中必然存在head(HeadContext)以及tail(TailContext)。inbound流向：head-&gt;tail；outbound流向：tail-&gt;head</li>
+</ul>
+
+<h2 id="link">link</h2>
+
+<ul>
+<li><a href="https://www.jianshu.com/p/b8bc306d3481">SOFA 源码分析 —— 过滤器设计</a></li>
+<li><a href="https://www.jianshu.com/p/087b7e9a27a2">netty源码分析之pipeline(二)</a></li>
+<li><a href="http://asanelder.me/2016/08/16/netty-pipeline">Netty-理解Pipeline</a></li>
+</ul></article>
+
+      
+
+      
+    </div>
+
+    
+  
+
+  <aside class="book-toc levels-3 fixed">
+    <nav id="TableOfContents">
+<ul>
+<li>
+<ul>
+<li><a href="#1-pipeline事件传播机制">1 pipeline事件传播机制</a></li>
+<li><a href="#2-pipeline初始化">2 pipeline初始化</a></li>
+<li><a href="#3-pipeline添加handler">3 pipeline添加handler</a></li>
+<li><a href="#4-pipeline-api">4 pipeline api</a></li>
+<li><a href="#5-tailcontext-和-headcontext">5 TailContext 和 HeadContext</a></li>
+<li><a href="#6-serverbootstrapacceptor">6 ServerBootstrapAcceptor</a></li>
+<li><a href="#7-encoder和decoder">7 Encoder和Decoder</a></li>
+<li><a href="#8-小结">8 小结</a></li>
+<li><a href="#link">link</a></li>
+</ul></li>
+</ul>
+</nav>
+  </aside>
+
+
+
+  </main>
+
+  
+</body>
+
+</html>

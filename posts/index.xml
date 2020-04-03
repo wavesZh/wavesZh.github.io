@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Posts on X-Y-Z</title>
+    <link>https://waveszh.github.io/posts/</link>
+    <description>Recent content in Posts on X-Y-Z</description>
+    <generator>Hugo -- gohugo.io</generator>
+    <lastBuildDate>Sun, 15 Mar 2020 18:20:31 +0800</lastBuildDate>
+    
+	<atom:link href="https://waveszh.github.io/posts/index.xml" rel="self" type="application/rss+xml" />
+    
+    
+    <item>
+      <title>深入理解JUC：synchronized</title>
+      <link>https://waveszh.github.io/posts/juc-synchronized/</link>
+      <pubDate>Sun, 15 Mar 2020 18:20:31 +0800</pubDate>
+      
+      <guid>https://waveszh.github.io/posts/juc-synchronized/</guid>
+      <description>&lt;p&gt;synchronized 关键字是 JAVA 中最基础的同步方式，以 JVM 底层的 monitor 监视器为基础实现的，但是由于使用 monitor 监视器会有上下文切换的损耗以及其他使用不便，JDK6 前推荐使用 LOCK 进行同步，随着 JVM 版本的升级，synchronized 得到了极大的优化：锁升级，锁粗化，锁消除等。&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>深入理解JUC：ThreadPoolExecutor</title>
+      <link>https://waveszh.github.io/posts/juc-thread_pool_executor/</link>
+      <pubDate>Mon, 20 Jan 2020 18:05:11 +0800</pubDate>
+      
+      <guid>https://waveszh.github.io/posts/juc-thread_pool_executor/</guid>
+      <description>&lt;p&gt;线程池是 JUC 的核心组件之一，简化了并发执行的实现，使得我们不需要关心线程的管理以及任务分配，只需要向池里丢任务就行了。&lt;code&gt;ThreadPoolExecutor&lt;/code&gt; 是线程池的核心实现。&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>Kafka 源码解析：KafkaConsumer 实现机制</title>
+      <link>https://waveszh.github.io/posts/kafka-consumer/</link>
+      <pubDate>Thu, 02 Jan 2020 22:17:09 +0800</pubDate>
+      
+      <guid>https://waveszh.github.io/posts/kafka-consumer/</guid>
+      <description>&lt;p&gt;Kafka 消费者负责从 Kafka 集群拉取消息进行消费以及提交 offset 偏移量。Kafka 定义了消费组的概念，消费组包含若干个普通消费者和一个 leader 消费者，leader 消费者会将 Topic 下的分区分配给自己以及其他消费者，原则是&lt;strong&gt;同一个 Topic 的一个分区只能分配给一个消费者&lt;/strong&gt;。多个消费者并行消费 Topic 中的数据，提高消费性能。由于消费者-Topic-分区数量均可变，需要进行 Rebalance 重新分配以保证消息消费的均衡性。&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>Netty Codec</title>
+      <link>https://waveszh.github.io/posts/netty-codec/</link>
+      <pubDate>Sun, 31 Mar 2019 21:56:38 +0800</pubDate>
+      
+      <guid>https://waveszh.github.io/posts/netty-codec/</guid>
+      <description>&lt;p&gt;Codec是编解码器，用于数据格式的转换。在网络通信中，底层都是通过字节流交互。故在Netty中需要实现应用程序的数据与字节流的转换：当进行远程
+跨进程服务调用时，需要将被传输的Java对象编码成字节数组或者ByteBuffer对象；当远程服务读取字节数组或者ByteBuffer对象，需要将其还原成发送时的对象。
+这听起来十分熟悉，就跟数据库存取数据一般，需要保证取的结果跟存时的一样。&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>Netty Handler</title>
+      <link>https://waveszh.github.io/posts/netty-handler/</link>
+      <pubDate>Sun, 24 Mar 2019 22:17:09 +0800</pubDate>
+      
+      <guid>https://waveszh.github.io/posts/netty-handler/</guid>
+      <description>&lt;p&gt;Web服务器通常都会使用filter来处理请求，这样就将处理流程分离和解耦。在Netty中也一样，其拥有&lt;code&gt;ChannelPipeline&lt;/code&gt;作为过滤器通道，消息在里面流动和传递，由其中的
+&lt;code&gt;Handler&lt;/code&gt;拦截处理。&lt;code&gt;Handler&lt;/code&gt;之间又由&lt;code&gt;Context（上下文）&lt;/code&gt;作为纽扣连接起来。&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>Netty Channel</title>
+      <link>https://waveszh.github.io/posts/netty-channel/</link>
+      <pubDate>Mon, 18 Mar 2019 18:22:40 +0800</pubDate>
+      
+      <guid>https://waveszh.github.io/posts/netty-channel/</guid>
+      <description>&lt;p&gt;channel在编程中是一个很常见的东西，中文解释为：通道。其一般是数据传输的媒介，例如FileChannel，SocketChannel等，可以进行异步的I/O操作。
+在Netty中也不例外，那么来看看其跟Java Nio Channel是如何配合的。&lt;/p&gt;
+
+&lt;!--
+带着问题找答案：
+
+1. netty的channel与nio自带的channel有什么关系，是扩展还是组合，优势，不然为什么要重新实现？
+
+2. channel扩展类的选择以及优化？
+--&gt;</description>
+    </item>
+    
+    <item>
+      <title>Netty EventLoop</title>
+      <link>https://waveszh.github.io/posts/netty-eventloop/</link>
+      <pubDate>Tue, 05 Mar 2019 12:08:21 +0800</pubDate>
+      
+      <guid>https://waveszh.github.io/posts/netty-eventloop/</guid>
+      <description>&lt;p&gt;Netty的NIO线程模型为Reactor，而EventLoop是Reactor的实现部分。&lt;/p&gt;</description>
+    </item>
+    
+    <item>
+      <title>深入理解JUC：AbstractQueuedSynchronizer</title>
+      <link>https://waveszh.github.io/posts/juc-aqs_new/</link>
+      <pubDate>Sat, 02 Mar 2019 14:50:36 +0800</pubDate>
+      
+      <guid>https://waveszh.github.io/posts/juc-aqs_new/</guid>
+      <description>&lt;p&gt;&lt;code&gt;AbstractQueuedSynchronizer&lt;/code&gt; 简称AQS, 是 JUC 并发框架的基石，支撑着 Lock 和 同步器的实现。其本质通过名称也能得知一二， &lt;strong&gt;Queued&lt;/strong&gt;，通过队列实现同步，尝试获取资源的线程将封装成节点在队列中以自旋的方式获取资源，实现线程同步。&lt;/p&gt;
+
+&lt;p&gt;在 AQS 中存在两种队列，同步队列和条件(等待)队列。同步队列中的节点是尝试获取资源失败的线程构成的，而条件队列中的节点是由于某些条件而挂起的线程构成的，类似 Object.wait/notify，当条件激活时，条件队列中的节点转移到同步队列并唤醒。&lt;/p&gt;</description>
+    </item>
+    
+  </channel>
+</rss>

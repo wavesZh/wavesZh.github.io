@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><meta property="og:title" content="Kafka 源码解析：KafkaConsumer 实现机制" />
+<meta property="og:description" content="Kafka 消费者负责从 Kafka 集群拉取消息进行消费以及提交 offset 偏移量。Kafka 定义了消费组的概念，消费组包含若干个普通消费者和一个 leader 消费者，leader 消费者会将 Topic 下的分区分配给自己以及其他消费者，原则是同一个 Topic 的一个分区只能分配给一个消费者。多个消费者并行消费 Topic 中的数据，提高消费性能。由于消费者-Topic-分区数量均可变，需要进行 Rebalance 重新分配以保证消息消费的均衡性。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://waveszh.github.io/posts/kafka-consumer/" />
+<meta property="article:published_time" content="2020-01-02T22:17:09+08:00" />
+<meta property="article:modified_time" content="2020-01-02T22:17:09+08:00" />
+<title>Kafka 源码解析：KafkaConsumer 实现机制 | X-Y-Z</title>
+<link rel="icon" href="/favicon.png" type="image/x-icon">
+
+
+<link rel="stylesheet" href="/book.min.a5976c405dae433d8f29b44570050888016c89d73d4734909e982c645bbb4d05.css" integrity="sha256-pZdsQF2uQz2PKbRFcAUIiAFsidc9RzSQnpgsZFu7TQU=">
+
+
+<script defer src="/search.min.4b5374ff6744223ff0adad18171a251385303ccb9ef225664aea3b0e539578fd.js" integrity="sha256-S1N0/2dEIj/wra0YFxolE4UwPMue8iVmSuo7DlOVeP0="></script>
+
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+  
+</head>
+
+<body>
+  <input type="checkbox" class="hidden" id="menu-control" />
+  <main class="flex container">
+
+    <aside class="book-menu fixed">
+      <nav>
+<h2 class="book-brand">
+  <a href="https://waveszh.github.io/"><span>X-Y-Z</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" placeholder="Search" id="book-search-input" maxlength="64" />
+  <div class="book-search-spinner spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+    <ul>
+<li><a href="/posts/"><strong>Blog</strong></a></li>
+</ul>
+
+
+
+
+
+</nav>
+
+
+<script>
+(function() {
+  var menu = document.querySelector("aside.book-menu nav");
+  addEventListener("beforeunload", function(event) {
+    localStorage.setItem("menu.scrollTop", menu.scrollTop);
+  });
+  menu.scrollTop = localStorage.getItem("menu.scrollTop");
+})();
+</script>
+
+    </aside>
+
+    <div class="book-posts">
+      <header class="flex align-center justify-between book-header">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" alt="Menu" />
+  </label>
+  <strong>Kafka 源码解析：KafkaConsumer 实现机制</strong>
+</header>
+
+      
+
+<header class="markdown">
+  <h1>Kafka 源码解析：KafkaConsumer 实现机制</h1>
+  <h5>
+    <strong>Jan 2, 2020</strong>
+  </h5>
+</header>
+<article class="markdown"><p>Kafka 消费者负责从 Kafka 集群拉取消息进行消费以及提交 offset 偏移量。Kafka 定义了消费组的概念，消费组包含若干个普通消费者和一个 leader 消费者，leader 消费者会将 Topic 下的分区分配给自己以及其他消费者，原则是<strong>同一个 Topic 的一个分区只能分配给一个消费者</strong>。多个消费者并行消费 Topic 中的数据，提高消费性能。由于消费者-Topic-分区数量均可变，需要进行 Rebalance 重新分配以保证消息消费的均衡性。</p>
+
+<h2 id="1-主题订阅">1. 主题订阅</h2>
+
+<p>一个消费者可以订阅多个主题</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> subscribe(Collection<span style="color:#f92672">&lt;</span>String<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">topics</span>, ConsumerRebalanceListener <span style="color:#a6e22e">listener</span>) {
+    <span style="color:#75715e">// 确保方法线程安全
+</span><span style="color:#75715e"></span>    acquireAndEnsureOpen();
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#75715e">// 检测 GroupId 是否设置
+</span><span style="color:#75715e"></span>        maybeThrowInvalidGroupIdException();
+        <span style="color:#66d9ef">if</span> (topics <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>)
+            <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> IllegalArgumentException(<span style="color:#e6db74">&#34;Topic collection to subscribe to cannot be null&#34;</span>);
+        <span style="color:#66d9ef">if</span> (topics.<span style="color:#a6e22e">isEmpty</span>()) {
+           <span style="color:#75715e">// 列表为空，则表示取消订阅
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">unsubscribe</span>();
+        } <span style="color:#66d9ef">else</span> {
+            <span style="color:#75715e">// 验证 topics 有效性
+</span><span style="color:#75715e"></span>            <span style="color:#960050;background-color:#1e0010">······</span>
+            <span style="color:#75715e">// 检测是否分区分配方式，默认为 RangeAssignor
+</span><span style="color:#75715e"></span>            throwIfNoAssignorsConfigured();
+            <span style="color:#75715e">// 清空非订阅分区拉取到的数据，避免消费错误
+</span><span style="color:#75715e"></span>            fetcher.<span style="color:#a6e22e">clearBufferedDataForUnassignedTopics</span>(topics);
+            log.<span style="color:#a6e22e">info</span>(<span style="color:#e6db74">&#34;Subscribed to topic(s): {}&#34;</span>, Utils.<span style="color:#a6e22e">join</span>(topics, <span style="color:#e6db74">&#34;, &#34;</span>));
+            <span style="color:#75715e">// 订阅主题
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (<span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">subscriptions</span>.<span style="color:#a6e22e">subscribe</span>(<span style="color:#66d9ef">new</span> HashSet<span style="color:#f92672">&lt;&gt;</span>(topics), listener))
+                <span style="color:#75715e">// 标志需更新 主题元数据
+</span><span style="color:#75715e"></span>                metadata.<span style="color:#a6e22e">requestUpdateForNewTopics</span>();
+        }
+    } <span style="color:#66d9ef">finally</span> {
+        release();
+    }
+}</code></pre></div>
+<p><strong>KafkaConsumer 不是线程安全的</strong>，所以订阅时使用了 <code>acquire</code>方法和 <code>release</code>方法，根据当前持有者 <code>currentThread</code>和引用数<code>refcount</code>实现了线程安全以及可冲入性。</p>
+
+<p>当列表为空，取消订阅：</p>
+
+<ol>
+<li>清除订阅关系以及拉取到的数据。</li>
+<li>发送 <code>LeaveGroupRequest</code> 请求至 Kafka 服务端对应的 GroupCoordinator 表明消费者离开了消费组。</li>
+</ol>
+
+<p>取消订阅需要通知 Kafka 服务端触发 Reblanace，以便服务端调整消费关系。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">synchronized</span> <span style="color:#66d9ef">void</span> <span style="color:#a6e22e">maybeLeaveGroup</span>() {
+    <span style="color:#75715e">// 非静态成员 &amp;&amp; coordinator broker 实例有效 &amp;&amp; 之前加入过 Group
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (isDynamicMember() <span style="color:#f92672">&amp;&amp;</span> <span style="color:#f92672">!</span>coordinatorUnknown() <span style="color:#f92672">&amp;&amp;</span>
+            state <span style="color:#f92672">!=</span> MemberState.<span style="color:#a6e22e">UNJOINED</span> <span style="color:#f92672">&amp;&amp;</span> generation.<span style="color:#a6e22e">hasMemberId</span>()) {
+        <span style="color:#75715e">// 组装发送 LeaveGroupRequest 请求
+</span><span style="color:#75715e"></span>        log.<span style="color:#a6e22e">info</span>(<span style="color:#e6db74">&#34;Member {} sending LeaveGroup request to coordinator {}&#34;</span>, generation.<span style="color:#a6e22e">memberId</span>, coordinator);
+        LeaveGroupRequest.<span style="color:#a6e22e">Builder</span> <span style="color:#a6e22e">request</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> LeaveGroupRequest.<span style="color:#a6e22e">Builder</span>(<span style="color:#66d9ef">new</span> LeaveGroupRequestData()
+                .<span style="color:#a6e22e">setGroupId</span>(groupId).<span style="color:#a6e22e">setMemberId</span>(generation.<span style="color:#a6e22e">memberId</span>));
+        client.<span style="color:#a6e22e">send</span>(coordinator, request)
+                .<span style="color:#a6e22e">compose</span>(<span style="color:#66d9ef">new</span> LeaveGroupResponseHandler());
+        client.<span style="color:#a6e22e">pollNoWakeup</span>();
+    }
+    <span style="color:#75715e">// 重置年代信息
+</span><span style="color:#75715e"></span>    resetGeneration();
+}</code></pre></div>
+<p>这里提到了<strong>静态成员</strong>，这是2.3提出的新概念，主要是为了减少 Reblanace。</p>
+
+<p>从<a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-345%3A+Introduce+static+membership+protocol+to+reduce+consumer+rebalances?focusedCommentId=110694746">KIP-345</a>可知，静态成员一般不会发送 <code>LeaveGroupRequest</code> 请求。仅当以下4种情况触发 Reblanace：</p>
+
+<ol>
+<li>新成员加入</li>
+<li>leader rejoin</li>
+<li>成员离线时间超过 session.timeout</li>
+<li>Broker 收到包含 <code>group.instance.id</code> 列表数据的 <code>LeaveGroupRequest</code> 请求</li>
+</ol>
+
+<p>若列表不为空，则订阅主题，更新本地主题列表并且 <code>needUpdate = true</code> 标志需更新 <code>Metadata</code> 以更新服务端的订阅关系数据。</p>
+
+<p>主题订阅类型有3种</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">enum</span> SubscriptionType {
+    NONE, 
+    <span style="color:#75715e">/** 按指定的主题订阅，自动分区 */</span>
+    AUTO_TOPICS, 
+    <span style="color:#75715e">/** 按正则匹配的主题订阅，自动分区 */</span>
+    AUTO_PATTERN, 
+    <span style="color:#75715e">/** 用户手动指定主题和分区 */</span>
+    USER_ASSIGNED
+}</code></pre></div>
+<h2 id="2-拉取前提">2. 拉取前提</h2>
+
+<p>KafkaConsumer 通过 <code>poll</code> 方法拉取消息，拥有多个重载方法。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">ConsumerRecords</span><span style="color:#f92672">&lt;</span>K, V<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">poll</span>(<span style="color:#66d9ef">final</span> <span style="color:#a6e22e">Timer</span> timer, <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">boolean</span> includeMetadataInTimeout) {
+    acquireAndEnsureOpen();
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#75715e">// 是否指定订阅类型 SubscriptionType
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (<span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">subscriptions</span>.<span style="color:#a6e22e">hasNoSubscriptionOrUserAssignment</span>()) {
+            <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> IllegalStateException(<span style="color:#e6db74">&#34;Consumer is not subscribed to any topics or assigned any partitions&#34;</span>);
+        }
+        <span style="color:#75715e">// 拉取数据直到超时
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">do</span> {
+            client.<span style="color:#a6e22e">maybeTriggerWakeup</span>();
+            <span style="color:#75715e">// 分区分配所用时间是否包含载超时时间内
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (includeMetadataInTimeout) {
+                <span style="color:#75715e">// 更分配信息
+</span><span style="color:#75715e"></span>                <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>updateAssignmentMetadataIfNeeded(timer)) {
+                    <span style="color:#66d9ef">return</span> ConsumerRecords.<span style="color:#a6e22e">empty</span>();
+                }
+            } <span style="color:#66d9ef">else</span> {
+                <span style="color:#75715e">// 使用一个新的 timer 阻塞直到分区分配完成
+</span><span style="color:#75715e"></span>                <span style="color:#66d9ef">while</span> (<span style="color:#f92672">!</span>updateAssignmentMetadataIfNeeded(time.<span style="color:#a6e22e">timer</span>(Long.<span style="color:#a6e22e">MAX_VALUE</span>))) {
+                    log.<span style="color:#a6e22e">warn</span>(<span style="color:#e6db74">&#34;Still waiting for metadata&#34;</span>);
+                }
+            }
+            <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">Map</span><span style="color:#f92672">&lt;</span>TopicPartition, List<span style="color:#f92672">&lt;</span>ConsumerRecord<span style="color:#f92672">&lt;</span>K, V<span style="color:#f92672">&gt;&gt;&gt;</span> <span style="color:#a6e22e">records</span> <span style="color:#f92672">=</span> pollForFetches(timer);
+            <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>records.<span style="color:#a6e22e">isEmpty</span>()) {
+                <span style="color:#75715e">/// 流水线模式处理，拉取到消息后，继续发起请求，异步处理，等到下一次 pollForFetches，能更快拿到消息，提高处理速度
+</span><span style="color:#75715e"></span>                <span style="color:#66d9ef">if</span> (fetcher.<span style="color:#a6e22e">sendFetches</span>() <span style="color:#f92672">&gt;</span> 0 <span style="color:#f92672">||</span> client.<span style="color:#a6e22e">hasPendingRequests</span>()) {
+                    <span style="color:#75715e">// 异步发起请求
+</span><span style="color:#75715e"></span>                    client.<span style="color:#a6e22e">pollNoWakeup</span>();
+                }
+                <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">interceptors</span>.<span style="color:#a6e22e">onConsume</span>(<span style="color:#66d9ef">new</span> ConsumerRecords<span style="color:#f92672">&lt;&gt;</span>(records));
+            }
+        } <span style="color:#66d9ef">while</span> (timer.<span style="color:#a6e22e">notExpired</span>());
+
+        <span style="color:#66d9ef">return</span> ConsumerRecords.<span style="color:#a6e22e">empty</span>();
+    } <span style="color:#66d9ef">finally</span> {
+        release();
+    }
+}</code></pre></div>
+<p>以上方法包含两个动作：分区分配以及拉取信息。<code>includeMetadataInTimeout</code> 参数决定分区分配的耗时是否包含在 <code>timer</code> 内。此外，由于 NIO 的便利，在拉取到数据后立即发起请求，不用阻塞等待响应结果，继续处理拉取到的数据，其他请求也在同步进行，形成一条流水线，提高处理效率。</p>
+
+<p>在拉取数据前，首先 <code>updateAssignmentMetadataIfNeeded</code> 方法需要确定分组以及拉取的 offset。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">boolean</span> poll(Timer <span style="color:#a6e22e">timer</span>) {
+    <span style="color:#75715e">// 更新订阅信息
+</span><span style="color:#75715e"></span>    maybeUpdateSubscriptionMetadata();
+    <span style="color:#75715e">// 回调处理 offset 提交的处理结果
+</span><span style="color:#75715e"></span>    invokeCompletedOffsetCommitCallbacks();
+
+    <span style="color:#75715e">// 是否由用户手动指定主题分区
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (subscriptions.<span style="color:#a6e22e">partitionsAutoAssigned</span>()) {
+        <span style="color:#75715e">// 提供心跳，否则 HeartbeatThread 收到心跳，则认为消费者 dead，触发 Rebalance
+</span><span style="color:#75715e"></span>        pollHeartbeat(timer.<span style="color:#a6e22e">currentTimeMs</span>());
+        <span style="color:#75715e">// 检测 broker 协调者有效性，是否能处理请求
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (coordinatorUnknown() <span style="color:#f92672">&amp;&amp;</span> <span style="color:#f92672">!</span>ensureCoordinatorReady(timer)) {
+            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
+        }
+        <span style="color:#75715e">// 是否需要 rejoin
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (rejoinNeededOrPending()) {
+            ......
+            <span style="color:#75715e">// 检测 Group 有效性
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>ensureActiveGroup(timer)) {
+                <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
+            }
+        }
+    } <span style="color:#66d9ef">else</span> {
+       ... ...
+    }
+    <span style="color:#75715e">// 如开启自动提交，则异步提交 offset
+</span><span style="color:#75715e"></span>    maybeAutoCommitOffsetsAsync(timer.<span style="color:#a6e22e">currentTimeMs</span>());
+    <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">true</span>;
+}</code></pre></div>
+<p><code>ConsumerCoordinator#poll</code> 方法主要做了以下操作：</p>
+
+<ol>
+<li>回调处理 offset 处理结果以及自动提交 offset；</li>
+<li>心跳；</li>
+<li>检查服务端 broker 协调者是否有效，确保能正常通信；</li>
+<li>如订阅关系发生改变，确保 Group 有效性</li>
+</ol>
+
+<p><code>ensureActiveGroup</code> 方法确保分组有效，如分组无效，则触发 JoinGroup。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">ensureActiveGroup</span>(<span style="color:#66d9ef">final</span> <span style="color:#a6e22e">Timer</span> timer) {
+    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>ensureCoordinatorReady(timer)) {
+        <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
+    }
+
+    startHeartbeatThreadIfNeeded();
+    <span style="color:#66d9ef">return</span> joinGroupIfNeeded(timer);
+}</code></pre></div>
+<h3 id="2-1-确保协调者有效">2.1 确保协调者有效</h3>
+
+<p><code>ensureCoordinatorReady</code> 方法确保 broker 协调者有效以便通知</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">protected</span> <span style="color:#a6e22e">synchronized</span> <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">ensureCoordinatorReady</span>(<span style="color:#66d9ef">final</span> <span style="color:#a6e22e">Timer</span> timer) {
+    <span style="color:#75715e">// 检查协调者是否有效
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>coordinatorUnknown())
+        <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">true</span>;
+
+    <span style="color:#66d9ef">do</span> {
+        <span style="color:#75715e">// 查找有效的 broker 协调者
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">RequestFuture</span><span style="color:#f92672">&lt;</span>Void<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">future</span> <span style="color:#f92672">=</span> lookupCoordinator();
+        <span style="color:#75715e">// 阻塞等待请求结果直至超时
+</span><span style="color:#75715e"></span>        client.<span style="color:#a6e22e">poll</span>(future, timer);
+
+        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>future.<span style="color:#a6e22e">isDone</span>()) {
+            <span style="color:#75715e">// 超时退出
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">break</span>;
+        }
+        <span style="color:#75715e">// 请求结果生异常
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (future.<span style="color:#a6e22e">failed</span>()) {
+            <span style="color:#75715e">// 是否为可重试异常
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (future.<span style="color:#a6e22e">isRetriable</span>()) {
+                log.<span style="color:#a6e22e">debug</span>(<span style="color:#e6db74">&#34;Coordinator discovery failed, refreshing metadata&#34;</span>);
+                client.<span style="color:#a6e22e">awaitMetadataUpdate</span>(timer);
+            } <span style="color:#66d9ef">else</span>
+                <span style="color:#66d9ef">throw</span> future.<span style="color:#a6e22e">exception</span>();
+        } <span style="color:#66d9ef">else</span> <span style="color:#66d9ef">if</span> (coordinator <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">&amp;&amp;</span> client.<span style="color:#a6e22e">isUnavailable</span>(coordinator)) {
+           <span style="color:#75715e">// 请求结果获取的 coordinator 无效，则退避等待后重试
+</span><span style="color:#75715e"></span>            markCoordinatorUnknown();
+            timer.<span style="color:#a6e22e">sleep</span>(retryBackoffMs);
+        }
+    } <span style="color:#66d9ef">while</span> (coordinatorUnknown() <span style="color:#f92672">&amp;&amp;</span> timer.<span style="color:#a6e22e">notExpired</span>());
+    <span style="color:#66d9ef">return</span> <span style="color:#f92672">!</span>coordinatorUnknown();
+}</code></pre></div>
+<p><code>lookupCoordinator</code> 方法根据最小活跃数负载均衡算法得到 broker 并向其发起 <code>FindCoordinatorRequest</code> 请求得到 Coordinator broker。</p>
+
+<h3 id="2-2-确保分组有效">2.2 确保分组有效</h3>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">joinGroupIfNeeded</span>(<span style="color:#66d9ef">final</span> <span style="color:#a6e22e">Timer</span> timer) {
+    <span style="color:#75715e">// 是否需要 rejoin. 当订阅关系发生改变或者首次
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">while</span> (rejoinNeededOrPending()) {
+        <span style="color:#75715e">// 确保 broker coordinator 有效
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>ensureCoordinatorReady(timer)) {
+            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
+        }
+
+        <span style="color:#75715e">// needsJoinPrepare 标志，避免重复触发 onJoinPrepare 方法
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (needsJoinPrepare) {
+            <span style="color:#75715e">// join 前的回调操作
+</span><span style="color:#75715e"></span>            onJoinPrepare(generation.<span style="color:#a6e22e">generationId</span>, generation.<span style="color:#a6e22e">memberId</span>);
+            needsJoinPrepare <span style="color:#f92672">=</span> <span style="color:#66d9ef">false</span>;
+        }
+        <span style="color:#75715e">// 发起 JoinGroupRequest 请求
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">RequestFuture</span><span style="color:#f92672">&lt;</span>ByteBuffer<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">future</span> <span style="color:#f92672">=</span> initiateJoinGroup();
+        client.<span style="color:#a6e22e">poll</span>(future, timer);
+        <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>future.<span style="color:#a6e22e">isDone</span>()) {
+            <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
+        }
+
+        <span style="color:#66d9ef">if</span> (future.<span style="color:#a6e22e">succeeded</span>()) {
+            <span style="color:#75715e">// 拷贝主题分区信息
+</span><span style="color:#75715e"></span>            ByteBuffer <span style="color:#a6e22e">memberAssignment</span> <span style="color:#f92672">=</span> future.<span style="color:#a6e22e">value</span>().<span style="color:#a6e22e">duplicate</span>();
+            <span style="color:#75715e">// join 完成后的回调操作
+</span><span style="color:#75715e"></span>            onJoinComplete(generation.<span style="color:#a6e22e">generationId</span>, generation.<span style="color:#a6e22e">memberId</span>, generation.<span style="color:#a6e22e">protocol</span>, memberAssignment);
+
+            <span style="color:#75715e">// 重置 JoinFuture, 以便下一次需要 join 时发起 JoinGroupRequest 请求
+</span><span style="color:#75715e"></span>            resetJoinGroupFuture();
+            needsJoinPrepare <span style="color:#f92672">=</span> <span style="color:#66d9ef">true</span>;
+        } <span style="color:#66d9ef">else</span> {
+            <span style="color:#75715e">// 失败处理，重试或抛异常
+</span><span style="color:#75715e"></span>            <span style="color:#960050;background-color:#1e0010">······</span>
+        }
+    }
+    <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">true</span>;
+}</code></pre></div>
+<p>发起 <code>JoinGroupRequest</code> 请求后的响应处理 <code>JoinGroupResponseHandler#handle</code> 方法</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> handle(JoinGroupResponse <span style="color:#a6e22e">joinResponse</span>, RequestFuture<span style="color:#f92672">&lt;</span>ByteBuffer<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">future</span>) {
+    Errors <span style="color:#a6e22e">error</span> <span style="color:#f92672">=</span> joinResponse.<span style="color:#a6e22e">error</span>();
+    <span style="color:#66d9ef">if</span> (error <span style="color:#f92672">==</span> Errors.<span style="color:#a6e22e">NONE</span>) {
+        log.<span style="color:#a6e22e">debug</span>(<span style="color:#e6db74">&#34;Received successful JoinGroup response: {}&#34;</span>, joinResponse);
+        sensors.<span style="color:#a6e22e">joinLatency</span>.<span style="color:#a6e22e">record</span>(response.<span style="color:#a6e22e">requestLatencyMs</span>());
+
+        <span style="color:#66d9ef">synchronized</span> (AbstractCoordinator.<span style="color:#a6e22e">this</span>) {
+            <span style="color:#75715e">// 检查 MemberState
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (state <span style="color:#f92672">!=</span> MemberState.<span style="color:#a6e22e">REBALANCING</span>) {
+                future.<span style="color:#a6e22e">raise</span>(<span style="color:#66d9ef">new</span> UnjoinedGroupException());
+            } <span style="color:#66d9ef">else</span> {
+                <span style="color:#75715e">// 设置 年代信息
+</span><span style="color:#75715e"></span>                AbstractCoordinator.<span style="color:#a6e22e">this</span>.<span style="color:#a6e22e">generation</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> Generation(joinResponse.<span style="color:#a6e22e">data</span>().<span style="color:#a6e22e">generationId</span>(),
+                        joinResponse.<span style="color:#a6e22e">data</span>().<span style="color:#a6e22e">memberId</span>(), joinResponse.<span style="color:#a6e22e">data</span>().<span style="color:#a6e22e">protocolName</span>());
+                <span style="color:#75715e">// 判断当前消费者是否是消费组里面的 leader        
+</span><span style="color:#75715e"></span>                <span style="color:#66d9ef">if</span> (joinResponse.<span style="color:#a6e22e">isLeader</span>()) {
+                    <span style="color:#75715e">// leader 操作， joinResponse 统计了所有消费者，以便 leader 分配分区
+</span><span style="color:#75715e"></span>                    onJoinLeader(joinResponse).<span style="color:#a6e22e">chain</span>(future);
+                } <span style="color:#66d9ef">else</span> {
+                    <span style="color:#75715e">// follower 操作
+</span><span style="color:#75715e"></span>                    onJoinFollower().<span style="color:#a6e22e">chain</span>(future);
+                }
+            }
+        }
+    } 
+    <span style="color:#75715e">// 异常处理省略
+</span><span style="color:#75715e"></span>    <span style="color:#960050;background-color:#1e0010">······</span>
+}</code></pre></div>
+<p><code>MemberState</code> 有三个状态：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">enum</span> MemberState {
+    UNJOINED,    <span style="color:#75715e">// 客户端还没有加入消费组
+</span><span style="color:#75715e"></span>    REBALANCING, <span style="color:#75715e">// 客户端正准备 Rebalance
+</span><span style="color:#75715e"></span>    STABLE,      <span style="color:#75715e">// 客户端已经加入消费者并已稳定运行
+</span><span style="color:#75715e"></span>}</code></pre></div>
+<p><code>JoinGroupRequest</code> 请求实际是为了确认消费组中的消费者 leader。<code>onJoinLeader</code> 方法将按照分区分配策略得到分配结果，发起 <code>SyncGroupRequest</code> 请求将分配结果同步给服务端； <code>onJoinFollower</code> 方法则只是发起 <code>SyncGroupRequest</code> 请求得到分区分配结果。</p>
+
+<blockquote>
+<p>JoinGroupRequest: 服务端收集消费者信息并确认 leader; SyncGroupRequest: leader 将分区分配信息同步至服务端； 服务端同步分区分配信息至消费者。</p>
+</blockquote>
+
+<h3 id="2-3-确保-offset-有效">2.3 确保 offset 有效</h3>
+
+<p>然后回到 <code>KafkaConsumer#updateAssignmentMetadataIfNeeded</code> 方法， <code>coordinator.poll</code> 执行后保证了分区分配信息的有效性，接下来要获取拉取 offset 的有效性了</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">boolean</span> updateFetchPositions(<span style="color:#66d9ef">final</span> <span style="color:#a6e22e">Timer</span> timer) {
+    <span style="color:#75715e">// 验证变更的leader的分配分区的偏移量
+</span><span style="color:#75715e"></span>    fetcher.<span style="color:#a6e22e">validateOffsetsIfNeeded</span>();
+    <span style="color:#75715e">// 检测是否分区都有有效的 offset    
+</span><span style="color:#75715e"></span>    cachedSubscriptionHashAllFetchPositions <span style="color:#f92672">=</span> subscriptions.<span style="color:#a6e22e">hasAllFetchPositions</span>();
+    <span style="color:#66d9ef">if</span> (cachedSubscriptionHashAllFetchPositions) <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">true</span>;
+    <span style="color:#75715e">// 刷新 offset
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (coordinator <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">&amp;&amp;</span> <span style="color:#f92672">!</span>coordinator.<span style="color:#a6e22e">refreshCommittedOffsetsIfNeeded</span>(timer)) <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">false</span>;
+    <span style="color:#75715e">// 刷新后仍没有有效 offset,设置重置策略
+</span><span style="color:#75715e"></span>    subscriptions.<span style="color:#a6e22e">resetMissingPositions</span>();
+    <span style="color:#75715e">// 发起 ListOffsetRequest 请求以重置 offset
+</span><span style="color:#75715e"></span>    fetcher.<span style="color:#a6e22e">resetOffsetsIfNeeded</span>();
+
+    <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">true</span>;
+}</code></pre></div>
+<p>获取拉取 offset 一般是2步：</p>
+
+<ol>
+<li>发起 <code>OffsetFetchRequest</code> 请求获取每个分区的 offset 信息；</li>
+<li>当某个分区没有 offset 时，执行 offset reset 策略。</li>
+</ol>
+
+<p>offset reset 策略有2种</p>
+
+<ol>
+<li>LATEST: 当各分区下有已提交的offset时，从提交的offset开始消费；无提交的offset时，消费新产生的该分区下的数据；在 Kafka 分区则表示把位移调整到分区当前最小位移</li>
+<li>EARLIEST: 当各分区下有已提交的offset时，从提交的offset开始消费；无提交的offset时，从头开始消费；在 Kafka 分区则表示把位移调整到分区当前最新位移</li>
+</ol>
+
+<h2 id="3-拉取消息">3. 拉取消息</h2>
+
+<p>以上操作完成后，即可开始拉取消息。回到 <code>KafkaConsumer.poll</code> 方法，其中 ´<code>pollForFetches</code> 方法负责拉取数据。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">synchronized</span> <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">sendFetches</span>() {
+    sensors.<span style="color:#a6e22e">maybeUpdateAssignment</span>(subscriptions);
+    <span style="color:#75715e">// 针对需要拉取的分区创建拉取请求      
+</span><span style="color:#75715e"></span>    Map<span style="color:#f92672">&lt;</span>Node, FetchSessionHandler.<span style="color:#a6e22e">FetchRequestData</span><span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">fetchRequestMap</span> <span style="color:#f92672">=</span> prepareFetchRequests();
+    <span style="color:#75715e">// Node 为可读分区的 broker 或者 leader broker
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">for</span> (Map.<span style="color:#a6e22e">Entry</span><span style="color:#f92672">&lt;</span>Node, FetchSessionHandler.<span style="color:#a6e22e">FetchRequestData</span><span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">entry</span> <span style="color:#f92672">:</span> fetchRequestMap.<span style="color:#a6e22e">entrySet</span>()) {
+        <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">Node</span> fetchTarget <span style="color:#f92672">=</span> entry.<span style="color:#a6e22e">getKey</span>();
+        <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">FetchSessionHandler</span>.<span style="color:#a6e22e">FetchRequestData</span> data <span style="color:#f92672">=</span> entry.<span style="color:#a6e22e">getValue</span>();
+        <span style="color:#75715e">// 组装 FetchRequest 请求
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">FetchRequest</span>.<span style="color:#a6e22e">Builder</span> request <span style="color:#f92672">=</span> FetchRequest.<span style="color:#a6e22e">Builder</span>
+                .<span style="color:#a6e22e">forConsumer</span>(<span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">maxWaitMs</span>, <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">minBytes</span>, data.<span style="color:#a6e22e">toSend</span>())
+                .<span style="color:#a6e22e">isolationLevel</span>(isolationLevel)
+                .<span style="color:#a6e22e">setMaxBytes</span>(<span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">maxBytes</span>)
+                .<span style="color:#a6e22e">metadata</span>(data.<span style="color:#a6e22e">metadata</span>())
+                .<span style="color:#a6e22e">toForget</span>(data.<span style="color:#a6e22e">toForget</span>())
+                .<span style="color:#a6e22e">rackId</span>(clientRackId);
+
+        <span style="color:#66d9ef">if</span> (log.<span style="color:#a6e22e">isDebugEnabled</span>()) {
+            log.<span style="color:#a6e22e">debug</span>(<span style="color:#e6db74">&#34;Sending {} {} to broker {}&#34;</span>, isolationLevel, data.<span style="color:#a6e22e">toString</span>(), fetchTarget);
+        }
+        <span style="color:#75715e">//发送 FetchRequest 请求
+</span><span style="color:#75715e"></span>        RequestFuture<span style="color:#f92672">&lt;</span>ClientResponse<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">future</span> <span style="color:#f92672">=</span> client.<span style="color:#a6e22e">send</span>(fetchTarget, request);
+        <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">nodesWithPendingFetchRequests</span>.<span style="color:#a6e22e">add</span>(entry.<span style="color:#a6e22e">getKey</span>().<span style="color:#a6e22e">id</span>());
+        <span style="color:#75715e">// 注册响应处理
+</span><span style="color:#75715e"></span>        future.<span style="color:#a6e22e">addListener</span>(<span style="color:#66d9ef">new</span> RequestFutureListener<span style="color:#f92672">&lt;</span>ClientResponse<span style="color:#f92672">&gt;</span>() {
+            <span style="color:#75715e">// 省略响应处理，待会再解析
+</span><span style="color:#75715e"></span>            <span style="color:#960050;background-color:#1e0010">······</span>
+        }
+    }
+    <span style="color:#75715e">// 返回请求数
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">return</span> fetchRequestMap.<span style="color:#a6e22e">size</span>();
+}</code></pre></div>
+<h3 id="3-1-确认拉取分区">3.1 确认拉取分区</h3>
+
+<p><code>prepareFetchRequests</code> 方法创建了拉取请求所需要的数据，从返回值为 <code>Map&lt;Node, FetchSessionHandler.FetchRequestData&gt;</code> 可看出，请求是以 Node 为区分的，一个 Node 只会请求一次，返回的数据可能包含了多个主题或多个分区的数据。</p>
+
+<p><code>fetchablePartitions</code> 方法： 如仍有数据待消费的分区，不需要再次 Fetch。</p>
+
+<p><code>this.nodesWithPendingFetchRequests.contains(node.id())</code> ： 如有待响应 Fetch 请求的分区，不需要再次 Fetch。</p>
+
+<p>在历史版本中，经过上面的过滤后的分区则是最终需要拉取的。但是 <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-227%3A+Introduce+Incremental+FetchRequests+to+Increase+Partition+Scalability">KIP-227</a> 中介绍了这种 Fetch 方式的低效原因：</p>
+
+<blockquote>
+<p>There are two major inefficiencies in the current FetchRequest paradigm.  The first one is that the set of partitions which the follower is interested in changes only rarely.  Yet each FetchRequest must enumerate the full set of partitions which the follower is interested in.  The second inefficiency is that even when nothing has changed in a partition since the previous FetchRequest, we must still send back metadata about that partition.</p>
+</blockquote>
+
+<p>感觉概括来说，对没有新消息的分区仍不断请求，broker仍返回改分区的元数据。针对这种场景，Kafka 提出了 <strong>FetchSession</strong> 避免将此作为每个 Fetch 请求的一部分重新发送。</p>
+
+<p><code>prepareFetchRequests</code> 方法有三个条件分支：</p>
+
+<ol>
+<li>node 是否存在</li>
+<li>对应 node 分区是否存在待响应的 fetch 请求</li>
+<li>准备 fetch 请求数据</li>
+</ol>
+
+<p>以下是分支3的主要操作:</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"> <span style="color:#66d9ef">public</span> <span style="color:#a6e22e">FetchRequestData</span> build() {
+    <span style="color:#75715e">// 是否全量请求
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (nextMetadata.<span style="color:#a6e22e">isFull</span>()) {
+        <span style="color:#66d9ef">if</span> (log.<span style="color:#a6e22e">isDebugEnabled</span>()) {
+            log.<span style="color:#a6e22e">debug</span>(<span style="color:#e6db74">&#34;Built full fetch {} for node {} with {}.&#34;</span>, nextMetadata, node, partitionsToLogString(next.<span style="color:#a6e22e">keySet</span>()));
+        }
+        <span style="color:#75715e">// 设置 fetch session 的分区
+</span><span style="color:#75715e"></span>        sessionPartitions <span style="color:#f92672">=</span> next;
+        next <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+        Map<span style="color:#f92672">&lt;</span>TopicPartition, PartitionData<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">toSend</span> <span style="color:#f92672">=</span> Collections.<span style="color:#a6e22e">unmodifiableMap</span>(<span style="color:#66d9ef">new</span> LinkedHashMap<span style="color:#f92672">&lt;&gt;</span>(sessionPartitions));
+        <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">new</span> FetchRequestData(toSend, Collections.<span style="color:#a6e22e">emptyList</span>(), toSend, nextMetadata);
+    }
+    <span style="color:#75715e">// 部分请求/增量请求
+</span><span style="color:#75715e"></span>    <span style="color:#75715e">// session 中 新增/删除/调整的分区
+</span><span style="color:#75715e"></span>    List<span style="color:#f92672">&lt;</span>TopicPartition<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">added</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> ArrayList<span style="color:#f92672">&lt;&gt;</span>();
+    List<span style="color:#f92672">&lt;</span>TopicPartition<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">removed</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> ArrayList<span style="color:#f92672">&lt;&gt;</span>();
+    List<span style="color:#f92672">&lt;</span>TopicPartition<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">altered</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> ArrayList<span style="color:#f92672">&lt;&gt;</span>();
+    <span style="color:#66d9ef">for</span> (Iterator<span style="color:#f92672">&lt;</span>Entry<span style="color:#f92672">&lt;</span>TopicPartition, PartitionData<span style="color:#f92672">&gt;&gt;</span> <span style="color:#a6e22e">iter</span> <span style="color:#f92672">=</span>
+             sessionPartitions.<span style="color:#a6e22e">entrySet</span>().<span style="color:#a6e22e">iterator</span>(); iter.<span style="color:#a6e22e">hasNext</span>(); ) {
+        Entry<span style="color:#f92672">&lt;</span>TopicPartition, PartitionData<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">entry</span> <span style="color:#f92672">=</span> iter.<span style="color:#a6e22e">next</span>();
+        TopicPartition <span style="color:#a6e22e">topicPartition</span> <span style="color:#f92672">=</span> entry.<span style="color:#a6e22e">getKey</span>();
+        PartitionData <span style="color:#a6e22e">prevData</span> <span style="color:#f92672">=</span> entry.<span style="color:#a6e22e">getValue</span>();
+        PartitionData <span style="color:#a6e22e">nextData</span> <span style="color:#f92672">=</span> next.<span style="color:#a6e22e">get</span>(topicPartition);
+        <span style="color:#66d9ef">if</span> (nextData <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span>) {
+            <span style="color:#66d9ef">if</span> (prevData.<span style="color:#a6e22e">equals</span>(nextData)) {
+                <span style="color:#75715e">// offset 跟上一次拉取时一致，此次不再拉取
+</span><span style="color:#75715e"></span>                next.<span style="color:#a6e22e">remove</span>(topicPartition);
+            } <span style="color:#66d9ef">else</span> {
+                <span style="color:#75715e">// 调整分区位置
+</span><span style="color:#75715e"></span>                next.<span style="color:#a6e22e">remove</span>(topicPartition);
+                next.<span style="color:#a6e22e">put</span>(topicPartition, nextData);
+                entry.<span style="color:#a6e22e">setValue</span>(nextData);
+                altered.<span style="color:#a6e22e">add</span>(topicPartition);
+            }
+        } <span style="color:#66d9ef">else</span> {
+            <span style="color:#75715e">// 将分区从 session 中删除
+</span><span style="color:#75715e"></span>            iter.<span style="color:#a6e22e">remove</span>();
+            removed.<span style="color:#a6e22e">add</span>(topicPartition);
+        }
+    }
+    <span style="color:#75715e">// 查找 next 中 sessionPartitions 没有的分区
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">for</span> (Entry<span style="color:#f92672">&lt;</span>TopicPartition, PartitionData<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">entry</span> <span style="color:#f92672">:</span> next.<span style="color:#a6e22e">entrySet</span>()) {
+        TopicPartition <span style="color:#a6e22e">topicPartition</span> <span style="color:#f92672">=</span> entry.<span style="color:#a6e22e">getKey</span>();
+        PartitionData <span style="color:#a6e22e">nextData</span> <span style="color:#f92672">=</span> entry.<span style="color:#a6e22e">getValue</span>();
+        <span style="color:#66d9ef">if</span> (sessionPartitions.<span style="color:#a6e22e">containsKey</span>(topicPartition)) {
+            <span style="color:#75715e">// 经过上面的循环后，sessionPartitions 和 next 共有的元素要么被删除了，要么移动至末尾，
+</span><span style="color:#75715e"></span>            <span style="color:#75715e">// 如果此时再次遇到共有元素，说明后面没有新的元素了
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">break</span>;
+        }
+        sessionPartitions.<span style="color:#a6e22e">put</span>(topicPartition, nextData);
+        added.<span style="color:#a6e22e">add</span>(topicPartition);
+    }
+    <span style="color:#66d9ef">if</span> (log.<span style="color:#a6e22e">isDebugEnabled</span>()) {
+        log.<span style="color:#a6e22e">debug</span>(<span style="color:#e6db74">&#34;Built incremental fetch {} for node {}. Added {}, altered {}, removed {} &#34;</span> <span style="color:#f92672">+</span>
+                  <span style="color:#e6db74">&#34;out of {}&#34;</span>, nextMetadata, node, partitionsToLogString(added),
+                  partitionsToLogString(altered), partitionsToLogString(removed),
+                  partitionsToLogString(sessionPartitions.<span style="color:#a6e22e">keySet</span>()));
+    }
+    Map<span style="color:#f92672">&lt;</span>TopicPartition, PartitionData<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">toSend</span> <span style="color:#f92672">=</span> Collections.<span style="color:#a6e22e">unmodifiableMap</span>(<span style="color:#66d9ef">new</span> LinkedHashMap<span style="color:#f92672">&lt;&gt;</span>(next));
+    Map<span style="color:#f92672">&lt;</span>TopicPartition, PartitionData<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">curSessionPartitions</span> <span style="color:#f92672">=</span> Collections.<span style="color:#a6e22e">unmodifiableMap</span>(<span style="color:#66d9ef">new</span> LinkedHashMap<span style="color:#f92672">&lt;&gt;</span>(sessionPartitions));
+    next <span style="color:#f92672">=</span> <span style="color:#66d9ef">null</span>;
+    <span style="color:#75715e">// 封装数据
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">return</span> <span style="color:#66d9ef">new</span> FetchRequestData(toSend, Collections.<span style="color:#a6e22e">unmodifiableList</span>(removed),
+        curSessionPartitions, nextMetadata);
+}</code></pre></div>
+<p><code>sessionPartitions</code> 只有3个场景进行了调整：</p>
+
+<ol>
+<li>全量拉取时初始化/赋值；</li>
+<li><code>sessionPartitions</code> 含有 next 没有的分区时剔除分区；</li>
+<li>next 中含有 <code>sessionPartitions</code> 没有的分区时新增分区。</li>
+</ol>
+
+<p>场景2的触发可能是 <code>prepareFetchRequests</code> 处理中的前2步过滤：待消费数据的分区以及待响应的 fetch 请求所属分区。
+场景3的触发可能是由于场景2剔除的分区，后面拉取通过了前2步过滤。</p>
+
+<p>以上只是客户端所做出的优化，需要服务的配套程序进行响应处理，还没看&hellip;</p>
+
+<h3 id="3-2-fetch-请求响应">3.2 Fetch 请求响应</h3>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java">future.<span style="color:#a6e22e">addListener</span>(<span style="color:#66d9ef">new</span> RequestFutureListener<span style="color:#f92672">&lt;</span>ClientResponse<span style="color:#f92672">&gt;</span>() {
+    <span style="color:#a6e22e">@Override</span>
+    <span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> onSuccess(ClientResponse <span style="color:#a6e22e">resp</span>) {
+        <span style="color:#66d9ef">synchronized</span> (Fetcher.<span style="color:#a6e22e">this</span>) {
+            <span style="color:#66d9ef">try</span> {
+                <span style="color:#a6e22e">@SuppressWarnings</span>(<span style="color:#e6db74">&#34;unchecked&#34;</span>)
+                FetchResponse<span style="color:#f92672">&lt;</span>Records<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">response</span> <span style="color:#f92672">=</span> (FetchResponse<span style="color:#f92672">&lt;</span>Records<span style="color:#f92672">&gt;</span>) resp.<span style="color:#a6e22e">responseBody</span>();
+                <span style="color:#75715e">// 获取 node 对应的 FetchSessionHandler
+</span><span style="color:#75715e"></span>                FetchSessionHandler <span style="color:#a6e22e">handler</span> <span style="color:#f92672">=</span> sessionHandler(fetchTarget.<span style="color:#a6e22e">id</span>());
+                <span style="color:#66d9ef">if</span> (handler <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
+                    log.<span style="color:#a6e22e">error</span>(<span style="color:#e6db74">&#34;Unable to find FetchSessionHandler for node {}. Ignoring fetch response.&#34;</span>, fetchTarget.<span style="color:#a6e22e">id</span>());
+                    <span style="color:#66d9ef">return</span>;
+                }
+                <span style="color:#75715e">// 校验数据以及更新 Fetch Session 相关信息
+</span><span style="color:#75715e"></span>                <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>handler.<span style="color:#a6e22e">handleResponse</span>(response)) {
+                    <span style="color:#66d9ef">return</span>;
+                }
+            
+                Set<span style="color:#f92672">&lt;</span>TopicPartition<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">partitions</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> HashSet<span style="color:#f92672">&lt;&gt;</span>(response.<span style="color:#a6e22e">responseData</span>().<span style="color:#a6e22e">keySet</span>());
+                FetchResponseMetricAggregator <span style="color:#a6e22e">metricAggregator</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> FetchResponseMetricAggregator(sensors, partitions);
+
+                <span style="color:#66d9ef">for</span> (Map.<span style="color:#a6e22e">Entry</span><span style="color:#f92672">&lt;</span>TopicPartition, FetchResponse.<span style="color:#a6e22e">PartitionData</span><span style="color:#f92672">&lt;</span>Records<span style="color:#f92672">&gt;&gt;</span> <span style="color:#a6e22e">entry</span> <span style="color:#f92672">:</span> response.<span style="color:#a6e22e">responseData</span>().<span style="color:#a6e22e">entrySet</span>()) {
+                    TopicPartition <span style="color:#a6e22e">partition</span> <span style="color:#f92672">=</span> entry.<span style="color:#a6e22e">getKey</span>();
+                    FetchRequest.<span style="color:#a6e22e">PartitionData</span> <span style="color:#a6e22e">requestData</span> <span style="color:#f92672">=</span> data.<span style="color:#a6e22e">sessionPartitions</span>().<span style="color:#a6e22e">get</span>(partition);
+                    <span style="color:#66d9ef">if</span> (requestData <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
+                        String <span style="color:#a6e22e">message</span>;
+                        <span style="color:#66d9ef">if</span> (data.<span style="color:#a6e22e">metadata</span>().<span style="color:#a6e22e">isFull</span>()) {
+                            message <span style="color:#f92672">=</span> MessageFormatter.<span style="color:#a6e22e">arrayFormat</span>( <span style="color:#e6db74">&#34;Response for missing full request partition: partition={}; metadata={}&#34;</span>, <span style="color:#66d9ef">new</span> Object[]{partition, data.<span style="color:#a6e22e">metadata</span>()}).<span style="color:#a6e22e">getMessage</span>();
+                        } <span style="color:#66d9ef">else</span> {
+                            message <span style="color:#f92672">=</span> MessageFormatter.<span style="color:#a6e22e">arrayFormat</span>(<span style="color:#e6db74">&#34;Response for missing session request partition: partition={}; metadata={}; toSend={}; toForget={}&#34;</span>, <span style="color:#66d9ef">new</span> Object[]{partition, data.<span style="color:#a6e22e">metadata</span>(), data.<span style="color:#a6e22e">toSend</span>(), data.<span style="color:#a6e22e">toForget</span>()}).<span style="color:#a6e22e">getMessage</span>();
+                        }
+                        <span style="color:#75715e">// Received fetch response for missing session partition
+</span><span style="color:#75715e"></span>                        <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> IllegalStateException(message);
+                    } <span style="color:#66d9ef">else</span> {
+                        <span style="color:#66d9ef">long</span> <span style="color:#a6e22e">fetchOffset</span> <span style="color:#f92672">=</span> requestData.<span style="color:#a6e22e">fetchOffset</span>;
+                        FetchResponse.<span style="color:#a6e22e">PartitionData</span><span style="color:#f92672">&lt;</span>Records<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">fetchData</span> <span style="color:#f92672">=</span> entry.<span style="color:#a6e22e">getValue</span>();
+
+                        log.<span style="color:#a6e22e">debug</span>(<span style="color:#e6db74">&#34;Fetch {} at offset {} for partition {} returned fetch data {}&#34;</span>,
+                                isolationLevel, fetchOffset, partition, fetchData);
+                        <span style="color:#75715e">// 封装为 CompletedFetch 丢入队列中
+</span><span style="color:#75715e"></span>                        completedFetches.<span style="color:#a6e22e">add</span>(<span style="color:#66d9ef">new</span> CompletedFetch(partition, fetchOffset, fetchData, metricAggregator,
+                                resp.<span style="color:#a6e22e">requestHeader</span>().<span style="color:#a6e22e">apiVersion</span>()));
+                    }
+                }
+                sensors.<span style="color:#a6e22e">fetchLatency</span>.<span style="color:#a6e22e">record</span>(resp.<span style="color:#a6e22e">requestLatencyMs</span>());
+            } <span style="color:#66d9ef">finally</span> {
+                nodesWithPendingFetchRequests.<span style="color:#a6e22e">remove</span>(fetchTarget.<span style="color:#a6e22e">id</span>());
+            }
+        }
+    }
+});</code></pre></div>
+<p>响应处理主要是将拉取到的数据封装为 <code>CompletedFetch</code> 丢入队列中，等待下一次 poll 消费 (<code>fetchedRecords</code> 方法)。</p>
+
+<h3 id="3-3-提取数据">3.3 提取数据</h3>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">Map</span><span style="color:#f92672">&lt;</span>TopicPartition, List<span style="color:#f92672">&lt;</span>ConsumerRecord<span style="color:#f92672">&lt;</span>K, V<span style="color:#f92672">&gt;&gt;&gt;</span> <span style="color:#a6e22e">fetchedRecords</span>() {
+    Map<span style="color:#f92672">&lt;</span>TopicPartition, List<span style="color:#f92672">&lt;</span>ConsumerRecord<span style="color:#f92672">&lt;</span>K, V<span style="color:#f92672">&gt;&gt;&gt;</span> <span style="color:#a6e22e">fetched</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> HashMap<span style="color:#f92672">&lt;&gt;</span>();
+    <span style="color:#75715e">// 限制最大拉取消息数，`max.poll.records`，由此可以控制消费速率
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">recordsRemaining</span> <span style="color:#f92672">=</span> maxPollRecords;
+    <span style="color:#66d9ef">try</span> {
+        <span style="color:#66d9ef">while</span> (recordsRemaining <span style="color:#f92672">&gt;</span> 0) {
+            <span style="color:#75715e">//  由于最大拉取消息数的限制，之前还未处理完的消息
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (nextInLineRecords <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">||</span> nextInLineRecords.<span style="color:#a6e22e">isFetched</span>) {
+                <span style="color:#75715e">// peek 方法不移除数据
+</span><span style="color:#75715e"></span>                CompletedFetch <span style="color:#a6e22e">completedFetch</span> <span style="color:#f92672">=</span> completedFetches.<span style="color:#a6e22e">peek</span>();
+                <span style="color:#66d9ef">if</span> (completedFetch <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) <span style="color:#66d9ef">break</span>;
+
+                <span style="color:#66d9ef">try</span> {
+                    <span style="color:#75715e">//  fetch done 回调
+</span><span style="color:#75715e"></span>                    nextInLineRecords <span style="color:#f92672">=</span> parseCompletedFetch(completedFetch);
+                } <span style="color:#66d9ef">catch</span> (Exception <span style="color:#a6e22e">e</span>) {
+                    <span style="color:#75715e">// fetched.isEmpty() 确保不会因为异常导致数据丢失
+</span><span style="color:#75715e"></span>                    <span style="color:#75715e">// partition.records == null || partition.records.sizeInBytes() == 0 无效数据可以丢弃
+</span><span style="color:#75715e"></span>                    FetchResponse.<span style="color:#a6e22e">PartitionData</span> <span style="color:#a6e22e">partition</span> <span style="color:#f92672">=</span> completedFetch.<span style="color:#a6e22e">partitionData</span>;
+                    <span style="color:#66d9ef">if</span> (fetched.<span style="color:#a6e22e">isEmpty</span>() <span style="color:#f92672">&amp;&amp;</span> (partition.<span style="color:#a6e22e">records</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">||</span> partition.<span style="color:#a6e22e">records</span>.<span style="color:#a6e22e">sizeInBytes</span>() <span style="color:#f92672">==</span> 0)) {
+                        completedFetches.<span style="color:#a6e22e">poll</span>();
+                    }
+                    <span style="color:#66d9ef">throw</span> e;
+                }
+                completedFetches.<span style="color:#a6e22e">poll</span>();
+            } <span style="color:#66d9ef">else</span> {
+                <span style="color:#75715e">// 提取数据并更新本地 offset 
+</span><span style="color:#75715e"></span>                List<span style="color:#f92672">&lt;</span>ConsumerRecord<span style="color:#f92672">&lt;</span>K, V<span style="color:#f92672">&gt;&gt;</span> <span style="color:#a6e22e">records</span> <span style="color:#f92672">=</span> fetchRecords(nextInLineRecords, recordsRemaining);
+                TopicPartition <span style="color:#a6e22e">partition</span> <span style="color:#f92672">=</span> nextInLineRecords.<span style="color:#a6e22e">partition</span>;
+                <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>records.<span style="color:#a6e22e">isEmpty</span>()) {
+                    List<span style="color:#f92672">&lt;</span>ConsumerRecord<span style="color:#f92672">&lt;</span>K, V<span style="color:#f92672">&gt;&gt;</span> <span style="color:#a6e22e">currentRecords</span> <span style="color:#f92672">=</span> fetched.<span style="color:#a6e22e">get</span>(partition);
+                    <span style="color:#66d9ef">if</span> (currentRecords <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
+                        fetched.<span style="color:#a6e22e">put</span>(partition, records);
+                    } <span style="color:#66d9ef">else</span> {
+                        <span style="color:#75715e">// this case shouldn&#39;t usually happen because we only send one fetch at a time per partition,
+</span><span style="color:#75715e"></span>                        <span style="color:#75715e">// but it might conceivably happen in some rare cases (such as partition leader changes).
+</span><span style="color:#75715e"></span>                        <span style="color:#75715e">// we have to copy to a new list because the old one may be immutable
+</span><span style="color:#75715e"></span>                        List<span style="color:#f92672">&lt;</span>ConsumerRecord<span style="color:#f92672">&lt;</span>K, V<span style="color:#f92672">&gt;&gt;</span> <span style="color:#a6e22e">newRecords</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> ArrayList<span style="color:#f92672">&lt;&gt;</span>(records.<span style="color:#a6e22e">size</span>() <span style="color:#f92672">+</span> currentRecords.<span style="color:#a6e22e">size</span>());
+                        newRecords.<span style="color:#a6e22e">addAll</span>(currentRecords);
+                        newRecords.<span style="color:#a6e22e">addAll</span>(records);
+                        fetched.<span style="color:#a6e22e">put</span>(partition, newRecords);
+                    }
+                    <span style="color:#75715e">// 更新剩余拉取信息数
+</span><span style="color:#75715e"></span>                    recordsRemaining <span style="color:#f92672">-=</span> records.<span style="color:#a6e22e">size</span>();
+                }
+            }
+        }
+    } <span style="color:#66d9ef">catch</span> (KafkaException <span style="color:#a6e22e">e</span>) {
+        <span style="color:#75715e">// 防止因 KafkaException 而丢弃数据
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (fetched.<span style="color:#a6e22e">isEmpty</span>())
+            <span style="color:#66d9ef">throw</span> e;
+    }
+    <span style="color:#66d9ef">return</span> fetched;
+}</code></pre></div><div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">Map</span><span style="color:#f92672">&lt;</span>TopicPartition, List<span style="color:#f92672">&lt;</span>ConsumerRecord<span style="color:#f92672">&lt;</span>K, V<span style="color:#f92672">&gt;&gt;&gt;</span> <span style="color:#a6e22e">fetchedRecords</span>() {
+    <span style="color:#75715e">// 异常处理
+</span><span style="color:#75715e"></span>    <span style="color:#960050;background-color:#1e0010">······</span>
+    Map<span style="color:#f92672">&lt;</span>TopicPartition, List<span style="color:#f92672">&lt;</span>ConsumerRecord<span style="color:#f92672">&lt;</span>K, V<span style="color:#f92672">&gt;&gt;&gt;</span> <span style="color:#a6e22e">drained</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> HashMap<span style="color:#f92672">&lt;&gt;</span>();
+    <span style="color:#75715e">// 限制最大拉取消息数，`max.poll.records`，由此可以控制消费速率
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">recordsRemaining</span> <span style="color:#f92672">=</span> maxPollRecords;
+    <span style="color:#66d9ef">while</span> (recordsRemaining <span style="color:#f92672">&gt;</span> 0) {
+        <span style="color:#66d9ef">if</span> (nextInLineRecords <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">||</span> nextInLineRecords.<span style="color:#a6e22e">isDrained</span>()) {
+            <span style="color:#75715e">// 从队列中拉取数据，每个 completedFetch 都是一个分区内的数据集
+</span><span style="color:#75715e"></span>            CompletedFetch <span style="color:#a6e22e">completedFetch</span> <span style="color:#f92672">=</span> completedFetches.<span style="color:#a6e22e">poll</span>();
+            <span style="color:#75715e">// 队列无数据后，退出循环，返回数据
+</span><span style="color:#75715e"></span>            <span style="color:#66d9ef">if</span> (completedFetch <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) <span style="color:#66d9ef">break</span>;
+            <span style="color:#66d9ef">try</span> {
+                <span style="color:#75715e">// 解析信息，反序列化以及处理服务端返回的错误码
+</span><span style="color:#75715e"></span>                nextInLineRecords <span style="color:#f92672">=</span> parseCompletedFetch(completedFetch);
+            } <span style="color:#66d9ef">catch</span> (KafkaException <span style="color:#a6e22e">e</span>) {
+                <span style="color:#66d9ef">if</span> (drained.<span style="color:#a6e22e">isEmpty</span>())
+                    <span style="color:#66d9ef">throw</span> e;
+                <span style="color:#75715e">// 记录异常    
+</span><span style="color:#75715e"></span>                nextInLineExceptionMetadata <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> ExceptionMetadata(completedFetch.<span style="color:#a6e22e">partition</span>, completedFetch.<span style="color:#a6e22e">fetchedOffset</span>, e);
+            }
+        } <span style="color:#66d9ef">else</span> {
+            TopicPartition <span style="color:#a6e22e">partition</span> <span style="color:#f92672">=</span> nextInLineRecords.<span style="color:#a6e22e">partition</span>;
+            <span style="color:#75715e">// 取数据以及更新本地 consume offset
+</span><span style="color:#75715e"></span>            List<span style="color:#f92672">&lt;</span>ConsumerRecord<span style="color:#f92672">&lt;</span>K, V<span style="color:#f92672">&gt;&gt;</span> <span style="color:#a6e22e">records</span> <span style="color:#f92672">=</span> drainRecords(nextInLineRecords, recordsRemaining);
+            <span style="color:#75715e">// 丢进 drained
+</span><span style="color:#75715e"></span>            <span style="color:#960050;background-color:#1e0010">······</span>
+        }
+    }
+    <span style="color:#75715e">// 返回每个分区的数据
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">return</span> drained;
+}</code></pre></div>
+<h2 id="4-offset-提交">4. offset 提交</h2>
+
+<p>offset 提交有两种方式：同步和异步。提交者为 <code>ConsumerCoordinator</code>。提交 offset 前需保证是否存在活跃的连接以及谁是集群 Coordinator。主要方法为 <code>sendOffsetCommitRequest</code>。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">private</span> <span style="color:#a6e22e">RequestFuture</span><span style="color:#f92672">&lt;</span>Void<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">sendOffsetCommitRequest</span>(<span style="color:#66d9ef">final</span> <span style="color:#a6e22e">Map</span><span style="color:#f92672">&lt;</span>TopicPartition, OffsetAndMetadata<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">offsets</span>) {
+    <span style="color:#75715e">// 检测 offsets 是否为空以及 coordinator 是否存在，如不存在，说明当前不处于有效分组内，不应该提交 offset.
+</span><span style="color:#75715e"></span>    ......
+    <span style="color:#75715e">// create the offset commit request
+</span><span style="color:#75715e"></span>    Map<span style="color:#f92672">&lt;</span>String, OffsetCommitRequestData.<span style="color:#a6e22e">OffsetCommitRequestTopic</span><span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">requestTopicDataMap</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> HashMap<span style="color:#f92672">&lt;&gt;</span>();
+    <span style="color:#66d9ef">for</span> (Map.<span style="color:#a6e22e">Entry</span><span style="color:#f92672">&lt;</span>TopicPartition, OffsetAndMetadata<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">entry</span> <span style="color:#f92672">:</span> offsets.<span style="color:#a6e22e">entrySet</span>()) {
+        <span style="color:#75715e">// 组装 OffsetCommitRequestTopic 和 分组
+</span><span style="color:#75715e"></span>        <span style="color:#960050;background-color:#1e0010">······</span>
+    }
+    <span style="color:#66d9ef">final</span> <span style="color:#a6e22e">Generation</span> generation;
+    <span style="color:#75715e">// 获取当前消费者所属 group 的年代信息
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">if</span> (subscriptions.<span style="color:#a6e22e">partitionsAutoAssigned</span>()) {
+        generation <span style="color:#f92672">=</span> generation();
+        <span style="color:#75715e">// 是否处于有效分组
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (generation <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
+            log.<span style="color:#a6e22e">info</span>(<span style="color:#e6db74">&#34;Failing OffsetCommit request since the consumer is not part of an active group&#34;</span>);
+            <span style="color:#66d9ef">return</span> RequestFuture.<span style="color:#a6e22e">failure</span>(<span style="color:#66d9ef">new</span> CommitFailedException());
+        }
+    } <span style="color:#66d9ef">else</span>
+        <span style="color:#75715e">// 由于 USER_ASSIGNED 类型不涉及 Rebalance, 故没有年代信息
+</span><span style="color:#75715e"></span>        generation <span style="color:#f92672">=</span> Generation.<span style="color:#a6e22e">NO_GENERATION</span>;
+
+    <span style="color:#75715e">// 组装请求，创建 OffsetCommitRequest 请求
+</span><span style="color:#75715e"></span>    OffsetCommitRequest.<span style="color:#a6e22e">Builder</span> <span style="color:#a6e22e">builder</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> OffsetCommitRequest.<span style="color:#a6e22e">Builder</span>(
+                <span style="color:#66d9ef">new</span> OffsetCommitRequestData()
+                        .<span style="color:#a6e22e">setGroupId</span>(<span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">groupId</span>)
+                        .<span style="color:#a6e22e">setGenerationId</span>(generation.<span style="color:#a6e22e">generationId</span>)
+                        .<span style="color:#a6e22e">setMemberId</span>(generation.<span style="color:#a6e22e">memberId</span>)
+                        .<span style="color:#a6e22e">setGroupInstanceId</span>(groupInstanceId.<span style="color:#a6e22e">orElse</span>(<span style="color:#66d9ef">null</span>))
+                        .<span style="color:#a6e22e">setTopics</span>(<span style="color:#66d9ef">new</span> ArrayList<span style="color:#f92672">&lt;&gt;</span>(requestTopicDataMap.<span style="color:#a6e22e">values</span>()))
+        );
+    <span style="color:#66d9ef">return</span> client.<span style="color:#a6e22e">send</span>(coordinator, builder)
+            .<span style="color:#a6e22e">compose</span>(<span style="color:#66d9ef">new</span> OffsetCommitResponseHandler(offsets));
+}</code></pre></div>
+<p>执行流程如下：</p>
+
+<ol>
+<li>检测 offsets 是否为空，空则直接返回成功；</li>
+<li>检测消费者所属 coordinator broker 实例的有效性，有效才可提交 offsets；</li>
+<li>组装请求所需数据并分组；</li>
+<li>获取年代信息，如果年代信息为 null, 则认为当前消费者并不属于此消费组，不应该提交 offsets；</li>
+<li>组装发送 OffsetCommitRequest 请求并注册响应处理器。</li>
+</ol>
+
+<p>当请求成功后，调用响应处理器 <code>OffsetCommitResponseHandler</code> 处理响应结果。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> handle(OffsetCommitResponse <span style="color:#a6e22e">commitResponse</span>, RequestFuture<span style="color:#f92672">&lt;</span>Void<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">future</span>) {
+    <span style="color:#75715e">// 统计请求时长
+</span><span style="color:#75715e"></span>    sensors.<span style="color:#a6e22e">commitLatency</span>.<span style="color:#a6e22e">record</span>(response.<span style="color:#a6e22e">requestLatencyMs</span>());
+    Set<span style="color:#f92672">&lt;</span>String<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">unauthorizedTopics</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> HashSet<span style="color:#f92672">&lt;&gt;</span>();
+
+    <span style="color:#75715e">// key 代表分区，value 代表错误码
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">for</span> (Map.<span style="color:#a6e22e">Entry</span><span style="color:#f92672">&lt;</span>TopicPartition, Short<span style="color:#f92672">&gt;</span> <span style="color:#a6e22e">entry</span> <span style="color:#f92672">:</span> commitResponse.<span style="color:#a6e22e">responseData</span>().<span style="color:#a6e22e">entrySet</span>()) {
+        TopicPartition <span style="color:#a6e22e">tp</span> <span style="color:#f92672">=</span> entry.<span style="color:#a6e22e">getKey</span>();
+        OffsetAndMetadata <span style="color:#a6e22e">offsetAndMetadata</span> <span style="color:#f92672">=</span> <span style="color:#66d9ef">this</span>.<span style="color:#a6e22e">offsets</span>.<span style="color:#a6e22e">get</span>(tp);
+        <span style="color:#66d9ef">long</span> <span style="color:#a6e22e">offset</span> <span style="color:#f92672">=</span> offsetAndMetadata.<span style="color:#a6e22e">offset</span>();
+        <span style="color:#75715e">// 获取错误码对应的详细信息
+</span><span style="color:#75715e"></span>        Errors <span style="color:#a6e22e">error</span> <span style="color:#f92672">=</span> Errors.<span style="color:#a6e22e">forCode</span>(entry.<span style="color:#a6e22e">getValue</span>());
+        <span style="color:#75715e">// 针对错误做特定处理：日志内容制定 是否需要才重试等等
+</span><span style="color:#75715e"></span>        <span style="color:#66d9ef">if</span> (error <span style="color:#f92672">==</span> Errors.<span style="color:#a6e22e">NONE</span>) {
+            <span style="color:#75715e">// 请求成功
+</span><span style="color:#75715e"></span>            log.<span style="color:#a6e22e">debug</span>(<span style="color:#e6db74">&#34;Committed offset {} for partition {}&#34;</span>, offset, tp);
+        }     
+        <span style="color:#75715e">// 错误处理
+</span><span style="color:#75715e"></span>        <span style="color:#960050;background-color:#1e0010">······</span>        
+    }
+
+    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>unauthorizedTopics.<span style="color:#a6e22e">isEmpty</span>()) {
+        log.<span style="color:#a6e22e">error</span>(<span style="color:#e6db74">&#34;Not authorized to commit to topics {} for group {}&#34;</span>, unauthorizedTopics, groupId);
+        future.<span style="color:#a6e22e">raise</span>(<span style="color:#66d9ef">new</span> TopicAuthorizationException(unauthorizedTopics));
+    } <span style="color:#66d9ef">else</span> {
+        future.<span style="color:#a6e22e">complete</span>(<span style="color:#66d9ef">null</span>);
+    }
+}</code></pre></div>
+<p>同步和异步提交的区别只在与是否存在 <code>ConsumerNetworkClient#poll</code> 方法阻塞发送请求。</p>
+
+<h2 id="5-rebalance">5. Rebalance</h2>
+
+<p>Rebalance 本质是一种协议，保证消费者数据消费的均衡。但在发生 Rebalance 时，消费组里面所有消费者都要停止工作，等待 Rebalance 完成。</p>
+
+<p>触发时机有3种：</p>
+
+<ol>
+<li>组员个数发生变化；</li>
+<li>订阅的 Topic 数量发生变化；</li>
+<li>订阅的 Topic 的分区数量发生变化。</li>
+</ol>
+
+<p>Rebalance 设计两步： Join 与 Sync：</p>
+
+<ol>
+<li>Join: 加入消费组。消费者发送 <code>JoinGroupRequest</code> 请求至集群 coordinator，请求加入消费组。coordinator 也在这个时候收集消费者信息并从中选择 consumer leader，并将组成员信息以及订阅信息交给 leader。</li>
+<li>Sync: 同步分区分配信息。消费者发送 <code>SyncGroupRequest</code> 请求至集群 coordinator。其中 leader 将分区分配方案同步给 coordinator， coordinator 返回分配方案给消费者。</li>
+</ol>
+
+<p>经过这两步后，消费关系已确定下来，接下来就是通过 <code>Heartbeart</code> 维持这段消费关系。如果 <code>Heartbeart</code> 没有按时发送，coordinator 将认定消费者 dead，将触发新一轮的 Rebalance。</p>
+
+<p>由于 Rebalance 使得消费组中的消费者停止工作，影响消费效率，故需尽可能避免不必要的 Rebalance。</p>
+
+<p>看看 <code>HeartbeatThread</code> 如何触发 Rebalance：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> run() {
+    <span style="color:#66d9ef">try</span> {
+        log.<span style="color:#a6e22e">debug</span>(<span style="color:#e6db74">&#34;Heartbeat thread started&#34;</span>);
+        <span style="color:#66d9ef">while</span> (<span style="color:#66d9ef">true</span>) {
+            <span style="color:#66d9ef">synchronized</span> (AbstractCoordinator.<span style="color:#a6e22e">this</span>) {
+                <span style="color:#960050;background-color:#1e0010">······</span>
+                <span style="color:#66d9ef">long</span> <span style="color:#a6e22e">now</span> <span style="color:#f92672">=</span> time.<span style="color:#a6e22e">milliseconds</span>();
+                <span style="color:#66d9ef">if</span> (coordinatorUnknown()) {
+                    <span style="color:#75715e">// 确认 coordinator 有效性
+</span><span style="color:#75715e"></span>                    <span style="color:#66d9ef">if</span> (findCoordinatorFuture <span style="color:#f92672">!=</span> <span style="color:#66d9ef">null</span> <span style="color:#f92672">||</span> lookupCoordinator().<span style="color:#a6e22e">failed</span>())
+                        AbstractCoordinator.<span style="color:#a6e22e">this</span>.<span style="color:#a6e22e">wait</span>(retryBackoffMs);
+                } <span style="color:#66d9ef">else</span> <span style="color:#66d9ef">if</span> (heartbeat.<span style="color:#a6e22e">sessionTimeoutExpired</span>(now)) {
+                    <span style="color:#75715e">// 在 sessionTimeout 时间内，没有收到心跳请求的响应，需重新查找有效的 coordinator
+</span><span style="color:#75715e"></span>                    markCoordinatorUnknown();
+                } <span style="color:#66d9ef">else</span> <span style="color:#66d9ef">if</span> (heartbeat.<span style="color:#a6e22e">pollTimeoutExpired</span>(now)) {
+                    <span style="color:#75715e">// poll 调用之间超出 maxPollIntervalMs 时间，则认为 consumer 不可用，显示离开分组
+</span><span style="color:#75715e"></span>                    log.<span style="color:#a6e22e">warn</span>(<span style="color:#e6db74">&#34;This member will leave the group because consumer poll timeout has expired. This &#34;</span> <span style="color:#f92672">+</span>
+                            <span style="color:#e6db74">&#34;means the time between subsequent calls to poll() was longer than the configured &#34;</span> <span style="color:#f92672">+</span>
+                            <span style="color:#e6db74">&#34;max.poll.interval.ms, which typically implies that the poll loop is spending too &#34;</span> <span style="color:#f92672">+</span>
+                            <span style="color:#e6db74">&#34;much time processing messages. You can address this either by increasing &#34;</span> <span style="color:#f92672">+</span>
+                            <span style="color:#e6db74">&#34;max.poll.interval.ms or by reducing the maximum size of batches returned in poll() &#34;</span> <span style="color:#f92672">+</span>
+                            <span style="color:#e6db74">&#34;with max.poll.records.&#34;</span>);
+                    maybeLeaveGroup();
+                } <span style="color:#66d9ef">else</span> <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>heartbeat.<span style="color:#a6e22e">shouldHeartbeat</span>(now)) {
+                    <span style="color:#75715e">// 还不需要发送心跳，等待
+</span><span style="color:#75715e"></span>                    AbstractCoordinator.<span style="color:#a6e22e">this</span>.<span style="color:#a6e22e">wait</span>(retryBackoffMs);
+                } <span style="color:#66d9ef">else</span> {
+                    <span style="color:#75715e">// 更新心跳, 并重置 heartbeatTimer
+</span><span style="color:#75715e"></span>                    heartbeat.<span style="color:#a6e22e">sentHeartbeat</span>(now);
+                    <span style="color:#75715e">// 发送 HeartbeatRequest 请求
+</span><span style="color:#75715e"></span>                    sendHeartbeatRequest().<span style="color:#a6e22e">addListener</span>(<span style="color:#66d9ef">new</span> RequestFutureListener<span style="color:#f92672">&lt;</span>Void<span style="color:#f92672">&gt;</span>() {
+                        <span style="color:#a6e22e">@Override</span>
+                        <span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> onSuccess(Void <span style="color:#a6e22e">value</span>) {
+                            <span style="color:#66d9ef">synchronized</span> (AbstractCoordinator.<span style="color:#a6e22e">this</span>) {
+                                <span style="color:#75715e">// 更新心跳，并重置 sessionTimer
+</span><span style="color:#75715e"></span>                                heartbeat.<span style="color:#a6e22e">receiveHeartbeat</span>();
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    } 
+    <span style="color:#75715e">// 异常处理
+</span><span style="color:#75715e"></span>    <span style="color:#960050;background-color:#1e0010">······</span>
+}</code></pre></div>
+<p>心跳涉及三个部分：</p>
+
+<ol>
+<li>heartbeatTimer. 下一次发送 HeartbeatRequest 请求的倒计时。超时后即发送请求。如果服务端在 <code>sessionTimeout</code> 时间内没收到请求，则认定 consumer dead，触发 Rebalance，其余消费者接收到心跳响应时，则开始 Join-Sync。</li>
+<li>pollTimer. 下一次 poll 调用的倒计时。超时后 <code>HeartbeatThread</code> 将推送 <code>LeaveGroupRequest</code> 请求触发 Rebalance。</li>
+<li>sessionTimer. 下一次收到心跳响应的倒计时。超时即表示没有收到服务端的心跳响应，consumer 认定 coordinator 不可靠，之后回在 poll 过程中确认 coordinator 是否有效，如果在 <code>sessionTimeout</code> 内还无法确认的话，则无法重置 pollTimer，则发生 2 情况。</li>
+</ol>
+
+<p>故可知，想要避免不必要的 Rebalance，需要保证 poll 操作间隔时间不可以超出 <code>maxPollIntervalMs</code>，即消费数据的速度不能太慢，也可以通过 <code>max.poll.records</code> 调节拉取数量已达到效果。</p>
+
+<h2 id="6-参考">6. 参考</h2>
+
+<ul>
+<li><a href="https://www.cnblogs.com/yoke/p/11405397.html">Kafka Rebalance机制分析</a></li>
+</ul></article>
+
+      
+
+      
+    </div>
+
+    
+  
+
+  <aside class="book-toc levels-3 fixed">
+    <nav id="TableOfContents">
+<ul>
+<li>
+<ul>
+<li><a href="#1-主题订阅">1. 主题订阅</a></li>
+<li><a href="#2-拉取前提">2. 拉取前提</a>
+<ul>
+<li><a href="#2-1-确保协调者有效">2.1 确保协调者有效</a></li>
+<li><a href="#2-2-确保分组有效">2.2 确保分组有效</a></li>
+<li><a href="#2-3-确保-offset-有效">2.3 确保 offset 有效</a></li>
+</ul></li>
+<li><a href="#3-拉取消息">3. 拉取消息</a>
+<ul>
+<li><a href="#3-1-确认拉取分区">3.1 确认拉取分区</a></li>
+<li><a href="#3-2-fetch-请求响应">3.2 Fetch 请求响应</a></li>
+<li><a href="#3-3-提取数据">3.3 提取数据</a></li>
+</ul></li>
+<li><a href="#4-offset-提交">4. offset 提交</a></li>
+<li><a href="#5-rebalance">5. Rebalance</a></li>
+<li><a href="#6-参考">6. 参考</a></li>
+</ul></li>
+</ul>
+</nav>
+  </aside>
+
+
+
+  </main>
+
+  
+</body>
+
+</html>

@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><meta property="og:title" content="Netty EventLoop" />
+<meta property="og:description" content="Netty的NIO线程模型为Reactor，而EventLoop是Reactor的实现部分。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://waveszh.github.io/posts/netty-eventloop/" />
+<meta property="article:published_time" content="2019-03-05T12:08:21+08:00" />
+<meta property="article:modified_time" content="2019-03-05T12:08:21+08:00" />
+<title>Netty EventLoop | X-Y-Z</title>
+<link rel="icon" href="/favicon.png" type="image/x-icon">
+
+
+<link rel="stylesheet" href="/book.min.a5976c405dae433d8f29b44570050888016c89d73d4734909e982c645bbb4d05.css" integrity="sha256-pZdsQF2uQz2PKbRFcAUIiAFsidc9RzSQnpgsZFu7TQU=">
+
+
+<script defer src="/search.min.4b5374ff6744223ff0adad18171a251385303ccb9ef225664aea3b0e539578fd.js" integrity="sha256-S1N0/2dEIj/wra0YFxolE4UwPMue8iVmSuo7DlOVeP0="></script>
+
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+  
+</head>
+
+<body>
+  <input type="checkbox" class="hidden" id="menu-control" />
+  <main class="flex container">
+
+    <aside class="book-menu fixed">
+      <nav>
+<h2 class="book-brand">
+  <a href="https://waveszh.github.io/"><span>X-Y-Z</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" placeholder="Search" id="book-search-input" maxlength="64" />
+  <div class="book-search-spinner spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+    <ul>
+<li><a href="/posts/"><strong>Blog</strong></a></li>
+</ul>
+
+
+
+
+
+</nav>
+
+
+<script>
+(function() {
+  var menu = document.querySelector("aside.book-menu nav");
+  addEventListener("beforeunload", function(event) {
+    localStorage.setItem("menu.scrollTop", menu.scrollTop);
+  });
+  menu.scrollTop = localStorage.getItem("menu.scrollTop");
+})();
+</script>
+
+    </aside>
+
+    <div class="book-posts">
+      <header class="flex align-center justify-between book-header">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" alt="Menu" />
+  </label>
+  <strong>Netty EventLoop</strong>
+</header>
+
+      
+
+<header class="markdown">
+  <h1>Netty EventLoop</h1>
+  <h5>
+    <strong>Mar 5, 2019</strong>
+  </h5>
+</header>
+<article class="markdown"><p>Netty的NIO线程模型为Reactor，而EventLoop是Reactor的实现部分。</p>
+
+<blockquote>
+<p>Netty version: 4.1</p>
+</blockquote>
+
+<h2 id="nio">NIO</h2>
+
+<p><img src="/images/linux-io-process.png" alt="" /></p>
+
+<p>一般来说，一次请求的具体过程为：用户进程发起请求，内核接受到请求后，从I/O设备中获取数据到buffer中，再将buffer中的数据copy到用户进程的地址空间，该用户进程获取到数据后再响应客户端。</p>
+
+<p>对于BIO，per connection per thread，I/O操作（Read,Write,Accept等）是阻塞的，因为内核空间和用户空间不能直接操作，数据需要进行拷贝，导致这部分的阻塞时间内线程白白阻塞，这样就成为高并发量的瓶颈。
+I/O操作的阻塞时间主要由等待事件（ready）和内存拷贝（copy）两部分组成。而内存拷贝一般可以忽略不计。故主要阻塞在于等待时间花费的时间（Ready）。</p>
+
+<p>nio的出现主要是为了提高并发量，并不会提高响应的速度。其大多使用I/O多路复用模式（Reactor），使用一个线程轮询已经准备好的事件然后通知用户线程去处理，避免所有的线程都阻塞，节约了线程资源。</p>
+
+<blockquote>
+<p>PS: 使用NIO != 高性能，当连接数&lt;1000，并发程度不高或者局域网环境下NIO并没有显著的性能优势。</p>
+</blockquote>
+
+<h2 id="reactor模式-https-github-com-waveszh-summary-blob-master-design-pattern-reactor-md"><a href="https://github.com/wavesZh/summary/blob/master/design-pattern/reactor.md">Reactor模式</a></h2>
+
+<p>简单来说，有3中模式：</p>
+
+<ol>
+<li>单线程Reactor</li>
+</ol>
+
+<p>接收连接和处理请求都在一个Reactor线程中完成。</p>
+
+<ol>
+<li>多线程Reactor</li>
+</ol>
+
+<p>将接收和处理分离，一个线程接收连接，一组线程处理请求。瓶颈在于接收线程。</p>
+
+<ol>
+<li>主从多线程Reactor</li>
+</ol>
+
+<p>一组线程接收连接，一组线程处理请求。</p>
+
+<p>一般实现有 <code>selector</code> 和 <code>epoll</code>。</p>
+
+<blockquote>
+<p>If you are running on linux you can use EpollEventLoopGroup and so get better performance, less GC and have more advanced features that are only available on linux.</p>
+</blockquote>
+
+<h2 id="eventloop">EventLoop</h2>
+
+<p>对Netty来说，Reactor的一般实现为<code>NioEventLoop</code>和<code>EpollEventLoop</code>。
+EpollEventLoop受系统限制：epoll仅工作于Linux；NioEventLoop则对应seletor。</p>
+
+<blockquote>
+<p>Netty支持单线程、多线程模型、主从多线程模型</p>
+</blockquote>
+
+<p>在我的认知中，Client的模型一般是单线程Reactor模式；Server的模型一般是多线程模式。
+虽然<code>ServerBootstrap</code>有两个group（类似ThreadPool的概念），看起来像主从Reactor，但是根据源码，但server初始化bind端口，只会从group中使用一个eventloop接收连接。除非多次bind。</p>
+
+<p><a href="https://stackoverflow.com/questions/34275138/why-do-we-really-need-multiple-netty-boss-threads">parent group的多线程的真正意义?</a><br />
+当一个JVM有两个不同的ServerBootstrap，共享一个parent group。如果parent group中只有一个线程，极端情况： boss线程一直只处理一个ServerBootstrap的连接。 so&hellip;&hellip;
+(当然你也可以强行认为即便多线程也全部只处理一个啦)。总之，这种情况可以提高效率。</p>
+
+<p>当acceptor线程接收到连接，创建channel并绑定到child group中的某个eventloop，I/O操作（Read,Write）以及业务处理都有这个eventloop完成，这要就实现了局部无锁化，避免了很多多线程竞争的问题。<br />
+由于eventloop负责I/O操作，关系到请求的响应性，故不能在eventloop中进行过于耗时操作，否则会影响到其他绑定到该eventloop的channel，导致响应时间过长。耗时的操作可以使用<code>DefaultEventLoopGroup</code>业务线程池。
+当然滥用业务线程池也不好，会造成过多的Context Switch（上下文切换）。</p>
+
+<h2 id="nioeventloop源码">NioEventLoop源码</h2>
+
+<p>想要有更深的理解，去读源码吧！</p>
+
+<!--### NioEventLoop继承关系-->
+
+<!--![](/images/nioeventloop-class.jpg)-->
+
+<!-- <img src="/images/nioeventloop-class.jpg" width = "800" height = "700" alt="图片名称" align=center /> -->
+
+<h3 id="主要方法">主要方法</h3>
+
+<h4 id="1-register">1. register</h4>
+
+<p>注册channel至selector并且与eventloop绑定，每个channel只能由一个eventloop处理，每个eventloop可以处理多个channel。</p>
+
+<h3 id="2-run">2. run</h3>
+
+<p>selector模式轮询已经准备好的I/O事件并处理以及任务调度等。</p>
+
+<h3 id="3-processselectedkey-selectionkey-k-abstractniochannel-ch">3. processSelectedKey(SelectionKey k, AbstractNioChannel ch)</h3>
+
+<p>处理selector找到ready options（如write,read,accept,connect）。其中可以看到，最终处理都是由<code>NioUnsafe</code>完成的。</p>
+
+<p>OP_CONNECT的处理：由于Connect事件一般发生在Client，需将OP_CONNECT从selector感兴趣的事件中删除，避免出现selector.select一直返回OP_CONNECT，
+触发ChannelActive，然后将OP_READ添加到selector感兴趣的事件中，selector继续轮询。</p>
+
+<p>OP_WRITE的处理：当发送缓冲区空间满的情况不能write，则注册该事件。当缓冲区有空闲空间则触发，强制flush并清除OP_WRITE，防止重复触发。</p>
+
+<p>OP_ACCEPT的处理：触发ChannelRead/ChannelReadComplete，创建新的channel并分配给child eventloop。</p>
+
+<p>OP_READ的处理：触发ChannelRead/ChannelReadComplete，读取消息。</p>
+
+<h3 id="4-runalltasks">4. runAllTasks</h3>
+
+<p>eventloop除了要处理I/O事件，还需要处理系统任务和定时任务。这些任务主要通过是<code>execute</code>方法放入task队列中。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#66d9ef">public</span> <span style="color:#a6e22e">void</span> execute(Runnable <span style="color:#a6e22e">task</span>) {
+    <span style="color:#66d9ef">if</span> (task <span style="color:#f92672">==</span> <span style="color:#66d9ef">null</span>) {
+        <span style="color:#66d9ef">throw</span> <span style="color:#66d9ef">new</span> NullPointerException(<span style="color:#e6db74">&#34;task&#34;</span>);
+    }
+    <span style="color:#66d9ef">boolean</span> <span style="color:#a6e22e">inEventLoop</span> <span style="color:#f92672">=</span> inEventLoop();
+    addTask(task);
+    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>inEventLoop) {
+        startThread();
+        <span style="color:#66d9ef">if</span> (isShutdown() <span style="color:#f92672">&amp;&amp;</span> removeTask(task)) {
+            reject();
+        }
+    }
+    
+    <span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>addTaskWakesUp <span style="color:#f92672">&amp;&amp;</span> wakesUpForTask(task)) {
+        wakeup(inEventLoop);
+    }
+}</code></pre></div>
+<p><code>inEventLoop()</code>方法判断当前线程不是eventloop所对应的线程。将task放入队列是为了确保只能被eventloop对应线程执行，这样做是为了减少线程间的竞争。</p>
+
+<h3 id="5-select-wakenup-getandset-false">5. select(wakenUp.getAndSet(false))</h3>
+
+<p>在for循环中，select循环ready I/O事件。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java">select(wakenUp.<span style="color:#a6e22e">getAndSet</span>(<span style="color:#66d9ef">false</span>));
+<span style="color:#66d9ef">if</span> (wakenUp.<span style="color:#a6e22e">get</span>()) {
+    selector.<span style="color:#a6e22e">wakeup</span>();
+}</code></pre></div>
+<p><code>wakenUp</code>标识selector是否应该从Selector.select阻塞操作中被唤醒。false则使用需要使用Selector.selectNow。<br />
+一般来说，<code>wakenUp.compareAndSet(false, true)</code>应该要早于<code>selector.wakeup()</code>（参考<code>NioEventLoop.wakeup</code>）以减少wakeup开销。
+但是当有<code>wakenUp</code>设置为true太早了，会出现两种情况：</p>
+
+<ol>
+<li>Selector is waken up between <code>wakenUp.getAndSet(false)</code> and <code>selector.select(...)</code>. (BAD)</li>
+<li>Selector is waken up between <code>selector.select(...)</code> and <code>if (wakenUp.get()) { ... }</code>. (OK)<br /></li>
+</ol>
+
+<p>情况1，根据<code>selector.wakeup()</code>方法注释：</p>
+
+<blockquote>
+<p>If no selection operation is currently in progress then the next invocation of one of these methods will return
+immediately unless the {@link #selectNow()} method is invoked in the meantime.</p>
+</blockquote>
+
+<p>可知，
+<code>selector.select(...)</code>立即唤醒直到下一次轮询<code>wakenUp.getAndSet(false)</code>，<code>wakenUp.compareAndSet(false, true)</code>失败会导致<code>NioEventLoop.wakeup</code>失败，无法唤醒Selector，造成不必要的阻塞。<br />
+故在select完成后如果<code>wakenUp</code>为true立即wakeup，下一次<code>selector.select(...)</code>会立即返回。（我感觉没有解决上面的问题啊！！！）</p>
+
+<h2 id="link">link</h2>
+
+<ul>
+<li><a href="https://juejin.im/post/5a41951af265da43176a6270">NIO基础</a><br /></li>
+<li><a href="https://zhuanlan.zhihu.com/p/23488863">Java NIO浅析</a></li>
+<li><a href="http://www.cnblogs.com/lvyahui/p/9030232.html">Reactor三种线程模型</a></li>
+<li><a href="https://www.cnblogs.com/549294286/p/5177663.html">netty性能优化</a></li>
+</ul></article>
+
+      
+
+      
+    </div>
+
+    
+  
+
+  <aside class="book-toc levels-3 fixed">
+    <nav id="TableOfContents">
+<ul>
+<li>
+<ul>
+<li><a href="#nio">NIO</a></li>
+<li><a href="#reactor模式-https-github-com-waveszh-summary-blob-master-design-pattern-reactor-md"><a href="https://github.com/wavesZh/summary/blob/master/design-pattern/reactor.md">Reactor模式</a></a></li>
+<li><a href="#eventloop">EventLoop</a></li>
+<li><a href="#nioeventloop源码">NioEventLoop源码</a>
+<ul>
+<li><a href="#主要方法">主要方法</a>
+<ul>
+<li><a href="#1-register">1. register</a></li>
+</ul></li>
+<li><a href="#2-run">2. run</a></li>
+<li><a href="#3-processselectedkey-selectionkey-k-abstractniochannel-ch">3. processSelectedKey(SelectionKey k, AbstractNioChannel ch)</a></li>
+<li><a href="#4-runalltasks">4. runAllTasks</a></li>
+<li><a href="#5-select-wakenup-getandset-false">5. select(wakenUp.getAndSet(false))</a></li>
+</ul></li>
+<li><a href="#link">link</a></li>
+</ul></li>
+</ul>
+</nav>
+  </aside>
+
+
+
+  </main>
+
+  
+</body>
+
+</html>

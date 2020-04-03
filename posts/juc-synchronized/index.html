@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><meta property="og:title" content="深入理解JUC：synchronized" />
+<meta property="og:description" content="synchronized 关键字是 JAVA 中最基础的同步方式，以 JVM 底层的 monitor 监视器为基础实现的，但是由于使用 monitor 监视器会有上下文切换的损耗以及其他使用不便，JDK6 前推荐使用 LOCK 进行同步，随着 JVM 版本的升级，synchronized 得到了极大的优化：锁升级，锁粗化，锁消除等。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://waveszh.github.io/posts/juc-synchronized/" />
+<meta property="article:published_time" content="2020-03-15T18:20:31+08:00" />
+<meta property="article:modified_time" content="2020-03-15T18:20:31+08:00" />
+<title>深入理解JUC：synchronized | X-Y-Z</title>
+<link rel="icon" href="/favicon.png" type="image/x-icon">
+
+
+<link rel="stylesheet" href="/book.min.a5976c405dae433d8f29b44570050888016c89d73d4734909e982c645bbb4d05.css" integrity="sha256-pZdsQF2uQz2PKbRFcAUIiAFsidc9RzSQnpgsZFu7TQU=">
+
+
+<script defer src="/search.min.4b5374ff6744223ff0adad18171a251385303ccb9ef225664aea3b0e539578fd.js" integrity="sha256-S1N0/2dEIj/wra0YFxolE4UwPMue8iVmSuo7DlOVeP0="></script>
+
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+  
+</head>
+
+<body>
+  <input type="checkbox" class="hidden" id="menu-control" />
+  <main class="flex container">
+
+    <aside class="book-menu fixed">
+      <nav>
+<h2 class="book-brand">
+  <a href="https://waveszh.github.io/"><span>X-Y-Z</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" placeholder="Search" id="book-search-input" maxlength="64" />
+  <div class="book-search-spinner spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+    <ul>
+<li><a href="/posts/"><strong>Blog</strong></a></li>
+</ul>
+
+
+
+
+
+</nav>
+
+
+<script>
+(function() {
+  var menu = document.querySelector("aside.book-menu nav");
+  addEventListener("beforeunload", function(event) {
+    localStorage.setItem("menu.scrollTop", menu.scrollTop);
+  });
+  menu.scrollTop = localStorage.getItem("menu.scrollTop");
+})();
+</script>
+
+    </aside>
+
+    <div class="book-posts">
+      <header class="flex align-center justify-between book-header">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" alt="Menu" />
+  </label>
+  <strong>深入理解JUC：synchronized</strong>
+</header>
+
+      
+
+<header class="markdown">
+  <h1>深入理解JUC：synchronized</h1>
+  <h5>
+    <strong>Mar 15, 2020</strong>
+  </h5>
+</header>
+<article class="markdown"><p>synchronized 关键字是 JAVA 中最基础的同步方式，以 JVM 底层的 monitor 监视器为基础实现的，但是由于使用 monitor 监视器会有上下文切换的损耗以及其他使用不便，JDK6 前推荐使用 LOCK 进行同步，随着 JVM 版本的升级，synchronized 得到了极大的优化：锁升级，锁粗化，锁消除等。</p>
+
+<h2 id="基本使用">基本使用</h2>
+
+<p>synchronized 可以修饰方法，也可以修饰对象。其根本的含义就是 “锁”。只是在不同的使用场景锁住的对象不一样而已。如果修饰静态方法，则锁住 <strong>class 对象</strong>；如果修饰非静态方法，则锁住 *<strong>class 实例对象</strong>；如果修饰代码块，则锁住<strong>监控对象</strong>。</p>
+
+<h2 id="优化">优化</h2>
+
+<h3 id="锁粗化">锁粗化</h3>
+
+<p>将多次</p>
+
+<h3 id="锁消除">锁消除</h3>
+
+<p>逃逸分析，如果发现被锁的对象并不会发生逃逸后，将把锁消除。例如，如果</p>
+
+<h3 id="对象头">对象头</h3>
+
+<p>在介绍锁升级之前，需要了解一个跟锁密切相关东西：对象头。其分为两部分：</p>
+
+<ol>
+<li>存储对象自身的运行时数据，如 hashCode，GC 分代年龄等，也称作 Mark Word;</li>
+<li>存储指向方法区对象类型（class type）的指针。</li>
+</ol>
+
+<p>Mark Word 按照 JVM 定义占用一个字长，在32位JVM就占用32位，64位JVM占用64位，以32位为例，结构如下：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-java" data-lang="java"><span style="color:#f92672">|-------------------------------------------------------|--------------------|</span>
+<span style="color:#f92672">|</span>                  Mark <span style="color:#a6e22e">Word</span> (32 <span style="color:#a6e22e">bits</span>)                  <span style="color:#f92672">|</span>       State        <span style="color:#f92672">|</span>
+<span style="color:#f92672">|-------------------------------------------------------|--------------------|</span>
+<span style="color:#f92672">|</span> identity_hashcode<span style="color:#f92672">:</span>25 <span style="color:#f92672">|</span> age<span style="color:#f92672">:</span>4 <span style="color:#f92672">|</span> biased_lock<span style="color:#f92672">:</span>1 <span style="color:#f92672">|</span> lock<span style="color:#f92672">:</span>2 <span style="color:#f92672">|</span>       Normal       <span style="color:#f92672">|</span>
+<span style="color:#f92672">|-------------------------------------------------------|--------------------|</span>
+<span style="color:#f92672">|</span>  thread<span style="color:#f92672">:</span>23 <span style="color:#f92672">|</span> epoch<span style="color:#f92672">:</span>2 <span style="color:#f92672">|</span> age<span style="color:#f92672">:</span>4 <span style="color:#f92672">|</span> biased_lock<span style="color:#f92672">:</span>1 <span style="color:#f92672">|</span> lock<span style="color:#f92672">:</span>2 <span style="color:#f92672">|</span>       Biased       <span style="color:#f92672">|</span>
+<span style="color:#f92672">|-------------------------------------------------------|--------------------|</span>
+<span style="color:#f92672">|</span>               ptr_to_lock_record<span style="color:#f92672">:</span>30          <span style="color:#f92672">|</span> lock<span style="color:#f92672">:</span>2 <span style="color:#f92672">|</span> Lightweight <span style="color:#a6e22e">Locked</span> <span style="color:#f92672">|</span>
+<span style="color:#f92672">|-------------------------------------------------------|--------------------|</span>
+<span style="color:#f92672">|</span>               ptr_to_heavyweight_monitor<span style="color:#f92672">:</span>30  <span style="color:#f92672">|</span> lock<span style="color:#f92672">:</span>2 <span style="color:#f92672">|</span> Heavyweight <span style="color:#a6e22e">Locked</span> <span style="color:#f92672">|</span>
+<span style="color:#f92672">|-------------------------------------------------------|--------------------|</span>
+<span style="color:#f92672">|</span>                                              <span style="color:#f92672">|</span> lock<span style="color:#f92672">:</span>2 <span style="color:#f92672">|</span>    Marked <span style="color:#a6e22e">for</span> GC   <span style="color:#f92672">|</span>
+<span style="color:#f92672">|-------------------------------------------------------|--------------------|</span></code></pre></div>
+<p>状态 <code>State</code> 主要 <code>biased_lock</code>（偏向锁启用标志位） 和 <code>lock</code>（锁状态） 控制：</p>
+
+<table>
+<thead>
+<tr>
+<th>biased_lock</th>
+<th>lock</th>
+<th>State</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td>0</td>
+<td>01</td>
+<td>无锁</td>
+</tr>
+
+<tr>
+<td>1</td>
+<td>01</td>
+<td>偏向锁</td>
+</tr>
+
+<tr>
+<td>0</td>
+<td>00</td>
+<td>轻量级锁</td>
+</tr>
+
+<tr>
+<td>0</td>
+<td>10</td>
+<td>重量级锁</td>
+</tr>
+
+<tr>
+<td>0</td>
+<td>11</td>
+<td>GC标记</td>
+</tr>
+</tbody>
+</table>
+
+<p>epoch：偏向锁的年代信息
+thread：持有偏向锁的线程 ID
+age：Java 对象年龄。
+ptr_to_lock_record：指向栈中锁记录的指针
+ptr_to_heavyweight_monitor：指向 monitor 的指针。</p>
+
+<h3 id="偏向锁">偏向锁</h3>
+
+<p>偏向锁针对这种场景：锁不存在多线程竞争且总是由同一个线程多次获取，此时可以降低锁获取带来的开销。偏向锁需要通过启动参数（-XX:+UseBiasedLocking）开启。</p>
+
+<p>当某个线程首次获取锁时，若支持偏向锁，则会尝试 CAS 将 Mark Word 中的 <code>thread</code> 替换成当前线程 ID，并将 <code>biased_lock</code> 设置为1且 <code>lock</code> 是指为 01。操作成功后，持有偏向锁的线程之后每次进入这个锁相关的同步块，只需要做以下操作：</p>
+
+<ol>
+<li>检查锁对象的 <code>biased_lock</code> 是否为 1， <code>lock</code> 是否为 01；</li>
+<li>检查锁对象的 <code>thread</code> 是否为当前线程；</li>
+<li>检查锁对象的 <code>epoch</code> 是否与 锁对象所属 class 对象的 <code>epoch</code> 是否一致。</li>
+</ol>
+
+<p>同时满足以上条件才能认为线程持有偏向锁。</p>
+
+<p>如果锁对象的 <code>thread</code> 是不为当前线程且此线程不存在后，将撤销偏向锁，此时锁对象的 <code>epoch</code> 加一。锁的撤销操作比较昂贵，需避免频繁发生：需在安全点进行操作。当撤销次数达到指定阈值（-XX:BiasedLockingBulkRebiasThreshold）后，将进行批量重偏向，将该 class 对象的 <code>epoch</code> 加一，并且对该 class 对象所有正在使用偏向锁的锁对象 <code>epoch</code> 替换为 class 的 <code>epoch</code>。如果线程下一个尝试获取锁对象时发现其 <code>epoch</code> 小于 class 对象的 epoch，则说明此时持有偏向锁的线程并没有处理同步块，即便持有偏向锁线程存活且不为当前线程，当前线程也不需要进行撤销操作，可以直接 CAS 更新锁对象的 <code>thread</code>。如果批量重偏向次数达到指定阀值（-XX:BiasedLockingBulkRevokeThreshold）后，则会进行批量撤销：JVM 认为该 class 的使用场景存在多线程竞争，不允许再使用偏向锁，进而升级为轻量级锁。</p>
+
+<h3 id="轻量级锁">轻量级锁</h3>
+
+<p>实际应用中必然存在多线程获取同一个对象锁的场景。其设计主要是为了减少重量级锁使用系统互斥量产生的性能损耗。</p>
+
+<p>轻量级锁的加锁过程：</p>
+
+<ol>
+<li>如果锁对象还未锁定，即 <code>lock</code> 为 01，则在当前线程的栈中建立锁记录（<code>Lock Record</code>）空间，其中部分空间（<code>Displaced Mark Word</code>）存储对象锁的 <code>Mark Word</code> 拷贝。</li>
+<li><code>CAS</code> 尝试将对象锁的 <code>ptr_to_lock_record</code> 更新为指向锁记录的指针，如更新成功，则代表当前线程成功持有锁。然后将对象锁的 <code>lock</code> 置为 00。</li>
+<li>如果 <code>CAS</code> 更新失败，则检查对象锁的 <code>ptr_to_lock_record</code> 是否指向当前线程的栈帧。如果是，则应该是发生了重入，将锁记录中的 <code>Displaced Mark Word</code> 置空；如不是，则代表锁已被其他线程持有。轻量级锁将升级为重量级锁：<code>lock</code> 置为 10。</li>
+</ol>
+
+<p>轻量级锁的解锁过程：</p>
+
+<p>如果对象锁中的 <code>ptr_to_lock_record</code> 指向当前线程的栈，则 <code>CAS</code> 将 <code>Displaced Mark Word</code> 替换到锁对象中的 <code>Mark Word</code>。如替换成功，则同步操作结束；若替换失败，则需升级为重量级锁并进入重量级锁的释放过程。</p>
+
+<p>由上可知，轻量级锁不能代替重量级锁，其只是在 “对于绝大部分的锁，在整个同步周期内都是不存在竞争的” 的条件下能避免了使用互斥量的开销。但是如果发生了竞争，除了互斥量的开销，还会有 CAS 带来的 CPU 开销，轻量级锁反而比重量级锁还要慢。</p>
+
+<h3 id="重量级锁">重量级锁</h3>
+
+<p>重量级锁依赖操作系统的互斥锁机制实现的，但线程尝试获取重量级锁时，如果重量级锁已被其他线程持有，则该线程则会阻塞，直到重量级锁释放后被唤醒。</p>
+
+<p>由于操作重量级锁涉及内核态和用户态的切换，对并发性能带来了很大压力。为了避免这种操作，提出了<strong>自旋锁</strong> 技术：让尝试获取锁的线程自旋等待一段时间，看是否能获取到锁。这样就避免了线程切换的开销，但是其还是需要占用 CPU 时间。故而又提出自旋阀值，如果自旋次数超出阀值，则按原有方式挂起线程。再后来提出了<strong>自适应自旋锁</strong>，意味着自旋阀值不再固定，由前一次在同一个锁上的自旋时间及锁的拥有者的状态来决定。如果同一个锁对象上自旋等待刚刚成功获得锁且持锁线程正在运行，则认为这次自旋很有可能再次成功。如果某锁对象很少自旋获得成功，则在以后可能直接略过自旋过程直接挂起，避免浪费 CPU 资源。</p>
+
+<h2 id="link">link</h2>
+
+<p>*<a href="https://houbb.github.io/2018/10/08/jvm-30-lock-optimize">JVM-锁消除+锁粗化 自旋锁、偏向锁、轻量级锁 逃逸分析-30</a></p></article>
+
+      
+
+      
+    </div>
+
+    
+  
+
+  <aside class="book-toc levels-3 fixed">
+    <nav id="TableOfContents">
+<ul>
+<li>
+<ul>
+<li><a href="#基本使用">基本使用</a></li>
+<li><a href="#优化">优化</a>
+<ul>
+<li><a href="#锁粗化">锁粗化</a></li>
+<li><a href="#锁消除">锁消除</a></li>
+<li><a href="#对象头">对象头</a></li>
+<li><a href="#偏向锁">偏向锁</a></li>
+<li><a href="#轻量级锁">轻量级锁</a></li>
+<li><a href="#重量级锁">重量级锁</a></li>
+</ul></li>
+<li><a href="#link">link</a></li>
+</ul></li>
+</ul>
+</nav>
+  </aside>
+
+
+
+  </main>
+
+  
+</body>
+
+</html>

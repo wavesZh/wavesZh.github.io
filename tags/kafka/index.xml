@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>kafka on X-Y-Z</title>
+    <link>https://waveszh.github.io/tags/kafka/</link>
+    <description>Recent content in kafka on X-Y-Z</description>
+    <generator>Hugo -- gohugo.io</generator>
+    <lastBuildDate>Thu, 02 Jan 2020 22:17:09 +0800</lastBuildDate>
+    
+	<atom:link href="https://waveszh.github.io/tags/kafka/index.xml" rel="self" type="application/rss+xml" />
+    
+    
+    <item>
+      <title>Kafka 源码解析：KafkaConsumer 实现机制</title>
+      <link>https://waveszh.github.io/posts/kafka-consumer/</link>
+      <pubDate>Thu, 02 Jan 2020 22:17:09 +0800</pubDate>
+      
+      <guid>https://waveszh.github.io/posts/kafka-consumer/</guid>
+      <description>&lt;p&gt;Kafka 消费者负责从 Kafka 集群拉取消息进行消费以及提交 offset 偏移量。Kafka 定义了消费组的概念，消费组包含若干个普通消费者和一个 leader 消费者，leader 消费者会将 Topic 下的分区分配给自己以及其他消费者，原则是&lt;strong&gt;同一个 Topic 的一个分区只能分配给一个消费者&lt;/strong&gt;。多个消费者并行消费 Topic 中的数据，提高消费性能。由于消费者-Topic-分区数量均可变，需要进行 Rebalance 重新分配以保证消息消费的均衡性。&lt;/p&gt;</description>
+    </item>
+    
+  </channel>
+</rss>
